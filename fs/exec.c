@@ -66,6 +66,7 @@
 #include <linux/io_uring.h>
 #include <linux/syscall_user_dispatch.h>
 #include <linux/coredump.h>
+#include <linux/kpac.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1920,6 +1921,10 @@ static int do_execveat_common(int fd, struct filename *filename,
 		goto out_free;
 
 	retval = copy_strings(bprm->argc, argv, bprm);
+	if (retval < 0)
+		goto out_free;
+
+	retval = kpac_insert_vma(bprm->mm);
 	if (retval < 0)
 		goto out_free;
 
