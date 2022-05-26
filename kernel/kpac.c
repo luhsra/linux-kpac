@@ -20,6 +20,7 @@ enum {
     PAC_CIPH,
 };
 
+#define KPAC_CPU 3
 #define KPAC_BASE 0xA000000UL
 #define KPAC_VM_FLAGS \
 	(VM_READ|VM_MAYREAD|VM_WRITE|VM_MAYWRITE|VM_MIXEDMAP|VM_SHARED)
@@ -34,6 +35,7 @@ static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 	return VM_FAULT_SIGBUS;
 }
 
+static struct cpumask kpac_cpumask;
 static struct page *kpac_pages[NR_CPUS];
 static unsigned long *kpac_areas[NR_CPUS];
 static const struct vm_special_mapping kpac_sm = {
@@ -144,8 +146,9 @@ static void kpacd_poll(void)
 {
 	int cpu;
 
-	for_each_online_cpu(cpu) {
+	for_each_cpu(cpu, &kpac_cpumask) {
 		unsigned long *user, state;
+		preempt_disable();
 		user = kpac_areas[cpu];
 
 		state = smp_load_acquire(&user[PAC_STATE]);
@@ -165,6 +168,7 @@ static void kpacd_poll(void)
 
 			smp_store_release(&user[PAC_STATE], DEV_STANDBY);
 		}
+		preempt_enable();
 
 		cpu_relax();
 	}
@@ -172,7 +176,15 @@ static void kpacd_poll(void)
 
 static int kpacd(void *none)
 {
-	sched_set_fifo(current);
+	/* Get the max time-sharing priority */
+	set_user_nice(current, MIN_NICE);
+
+	/* Exclude our CPU from the cpumask */
+	preempt_disable();
+	cpumask_copy(&kpac_cpumask, cpu_online_mask);
+	/* FIXME (kpac): make is_percpu_thread return true */
+	cpumask_clear_cpu(smp_processor_id(), &kpac_cpumask);
+	preempt_enable();
 
 	while (!kthread_should_stop()) {
 		kpacd_poll();
@@ -188,7 +200,7 @@ static int start_stop_kpacd(void)
 
 	mutex_lock(&kpacd_mutex);
 	if (!kpacd_thread) {
-		kpacd_thread = kthread_run(kpacd, NULL, "kpacd");
+		kpacd_thread = kthread_run_on_cpu(kpacd, NULL, KPAC_CPU, "kpacd");
 
 		if (IS_ERR(kpacd_thread)) {
 			pr_err("kpacd: kthread_run(kpacd) failed\n");
