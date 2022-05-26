@@ -216,11 +216,8 @@ static int kpacd(void *none)
 	set_user_nice(current, MIN_NICE);
 
 	/* Exclude our CPU from the cpumask */
-	preempt_disable();
 	cpumask_copy(&kpac_cpumask, cpu_online_mask);
-	/* FIXME (kpac): make is_percpu_thread return true */
 	cpumask_clear_cpu(smp_processor_id(), &kpac_cpumask);
-	preempt_enable();
 
 	while (!kthread_should_stop()) {
 		kpacd_poll();
