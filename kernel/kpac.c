@@ -35,13 +35,14 @@ static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 	return VM_FAULT_SIGBUS;
 }
 
-static struct cpumask kpac_cpumask;
-static struct page *kpac_pages[NR_CPUS];
-static unsigned long *kpac_areas[NR_CPUS];
 static const struct vm_special_mapping kpac_sm = {
 	.name = "kpac",
 	.fault = kpac_fault,
 };
+
+static struct cpumask kpac_cpumask;
+static struct page *kpac_pages[NR_CPUS];
+static unsigned long *kpac_areas[NR_CPUS];
 
 /*
  * Preallocate page tables for the specified user address.
@@ -70,8 +71,38 @@ static int alloc_pgtables(struct mm_struct *mm, unsigned long addr)
 }
 
 /**
- * kpac_migrate - Replace kpac page of the process on migration.
- * @p: Target process being migrated.
+ * kpac_switch - Restore kpac context on task switch.
+ * @next: Task being scheduled next.
+ *
+ * Store internal state of the device of @current task into the TCB and restore
+ * saved context for the @next task.
+ */
+void kpac_switch(struct task_struct *next)
+{
+	int cpu = smp_processor_id();
+	struct task_struct *prev = current;
+	unsigned long *area = kpac_areas[cpu];
+
+	if (!area)
+		return;
+
+	/* Let the kpacd thread finish authentication. */
+	while (smp_load_acquire(&area[0]))
+		cpu_relax();
+
+	if (prev->mm) {
+		unsigned long *dst = prev->kpac_context.regs;
+		memcpy(dst, area, sizeof(*dst) * KPAC_NR_REGS);
+	}
+	if (next->mm) {
+		unsigned long *src = next->kpac_context.regs;
+		memcpy(area, src, sizeof(*src) * KPAC_NR_REGS);
+	}
+}
+
+/**
+ * kpac_migrate - Replace kpac page of the task on migration.
+ * @p: Task being migrated.
  * @cpu: Destination cpu of the migration.
  */
 void kpac_migrate(struct task_struct *p, int cpu)
@@ -82,10 +113,9 @@ void kpac_migrate(struct task_struct *p, int cpu)
 	pte_t *pte, entry;
 	spinlock_t *ptl;
 
-	if (!mm || !mm->kpac_vma) {
-		trace_printk("kpac: no mm/vma\n");
+	/* Skip kernel threads and tasks where kpac wasn't initialized */
+	if (!mm || !mm->kpac_vma)
 		return;
-	}
 
 	BUG_ON(!new_page);
 
@@ -140,6 +170,8 @@ int kpac_exec(void)
 	preempt_disable();
 	kpac_migrate(current, smp_processor_id());
 	preempt_enable();
+
+	memset(&current->kpac_context, 0, sizeof(current->kpac_context));
 
 out_unlock:
 	mmap_write_unlock(mm);

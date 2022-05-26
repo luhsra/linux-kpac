@@ -34,6 +34,7 @@
 #include <linux/rseq.h>
 #include <linux/seqlock.h>
 #include <linux/kcsan.h>
+#include <linux/kpac.h>
 #include <asm/kmap_size.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
@@ -848,6 +849,9 @@ struct task_struct {
 	bool				trc_reader_checked;
 	struct list_head		trc_holdout_list;
 #endif /* #ifdef CONFIG_TASKS_TRACE_RCU */
+
+	/* Software-based pointer authentication: */
+	struct kpac_context		kpac_context;
 
 	struct sched_info		sched_info;
 
