@@ -1457,6 +1457,8 @@ void finalize_exec(struct linux_binprm *bprm)
 	task_lock(current->group_leader);
 	current->signal->rlim[RLIMIT_STACK] = bprm->rlim_stack;
 	task_unlock(current->group_leader);
+
+	WARN_ON(kpac_exec());
 }
 EXPORT_SYMBOL(finalize_exec);
 
@@ -1921,10 +1923,6 @@ static int do_execveat_common(int fd, struct filename *filename,
 		goto out_free;
 
 	retval = copy_strings(bprm->argc, argv, bprm);
-	if (retval < 0)
-		goto out_free;
-
-	retval = kpac_insert_vma(bprm->mm);
 	if (retval < 0)
 		goto out_free;
 

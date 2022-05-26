@@ -71,9 +71,12 @@ static int alloc_pgtables(struct mm_struct *mm, unsigned long addr)
 
 /**
  * kpac_migrate - Replace kpac page of the process on migration.
+ * @p: Target process being migrated.
+ * @cpu: Destination cpu of the migration.
  */
-void kpac_migrate(struct mm_struct *mm, int cpu)
+void kpac_migrate(struct task_struct *p, int cpu)
 {
+	struct mm_struct *mm = p->mm;
 	struct page *old_page = NULL;
 	struct page *new_page = kpac_pages[cpu];
 	pte_t *pte, entry;
@@ -110,10 +113,11 @@ void kpac_migrate(struct mm_struct *mm, int cpu)
 }
 
 /**
- * kpac_insert_vma - Prepare the process for kpac on startup.
+ * kpac_exec - Prepare kpac mapping on process startup.
  */
-int kpac_insert_vma(struct mm_struct *mm)
+int kpac_exec(void)
 {
+	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	int ret = 0;
 
@@ -134,7 +138,7 @@ int kpac_insert_vma(struct mm_struct *mm)
 		goto out_unlock;
 
 	preempt_disable();
-	kpac_migrate(mm, smp_processor_id());
+	kpac_migrate(current, smp_processor_id());
 	preempt_enable();
 
 out_unlock:
