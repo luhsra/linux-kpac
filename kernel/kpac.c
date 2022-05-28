@@ -257,7 +257,7 @@ static int __init kpac_init(void)
 	int cpu;
 
 	for_each_present_cpu(cpu) {
-		page = alloc_page(GFP_USER);
+		page = alloc_page(GFP_USER | __GFP_ZERO);
 		if (!page)
 			goto out_nomem;
 		kpac_pages[cpu] = page;
@@ -274,7 +274,7 @@ out_nomem:
 		kpac_areas[cpu] = NULL;
 		if (page) {
 			kunmap(page);
-			put_page(page);
+			__free_page(page);
 		}
 	}
 
