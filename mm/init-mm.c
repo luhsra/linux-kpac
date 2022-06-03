@@ -44,8 +44,13 @@ struct mm_struct init_mm = {
 void setup_initial_init_mm(void *start_code, void *end_code,
 			   void *end_data, void *brk)
 {
+	int cpu;
+
 	init_mm.start_code = (unsigned long)start_code;
 	init_mm.end_code = (unsigned long)end_code;
 	init_mm.end_data = (unsigned long)end_data;
 	init_mm.brk = (unsigned long)brk;
+
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		init_mm.pcpu_pgds[cpu] = swapper_pg_dir;
 }

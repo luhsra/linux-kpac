@@ -132,6 +132,8 @@ static inline pgd_t *pgd_offset_pgd(pgd_t *pgd, unsigned long address)
 #define pgd_offset(mm, address)		pgd_offset_pgd((mm)->pgd, (address))
 #endif
 
+#define pgd_offset_cpu(mm, n, address)	pgd_offset_pgd((mm)->pcpu_pgds[n], (address))
+
 /*
  * a shortcut which implies the use of the kernel's pgd, instead
  * of a process's

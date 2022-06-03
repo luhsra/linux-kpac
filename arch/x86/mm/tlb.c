@@ -495,6 +495,8 @@ void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 	u64 next_tlb_gen;
 	bool need_flush;
 	u16 new_asid;
+	pgd_t *pgd_next = next->pcpu_pgds[cpu];
+	pgd_t *pgd_real_prev = real_prev->pcpu_pgds[cpu];
 
 	/*
 	 * NB: The scheduler will call us with prev == next when switching
@@ -519,7 +521,7 @@ void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 	 * isn't free.
 	 */
 #ifdef CONFIG_DEBUG_VM
-	if (WARN_ON_ONCE(__read_cr3() != build_cr3(real_prev->pgd, prev_asid))) {
+	if (WARN_ON_ONCE(__read_cr3() != build_cr3(pgd_real_prev, prev_asid))) {
 		/*
 		 * If we were to BUG here, we'd be very likely to kill
 		 * the system so hard that we don't see the call trace.
@@ -624,12 +626,12 @@ void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 	if (need_flush) {
 		this_cpu_write(cpu_tlbstate.ctxs[new_asid].ctx_id, next->context.ctx_id);
 		this_cpu_write(cpu_tlbstate.ctxs[new_asid].tlb_gen, next_tlb_gen);
-		load_new_mm_cr3(next->pgd, new_asid, true);
+		load_new_mm_cr3(pgd_next, new_asid, true);
 
 		trace_tlb_flush(TLB_FLUSH_ON_TASK_SWITCH, TLB_FLUSH_ALL);
 	} else {
 		/* The new ASID is already up to date. */
-		load_new_mm_cr3(next->pgd, new_asid, false);
+		load_new_mm_cr3(pgd_next, new_asid, false);
 
 		trace_tlb_flush(TLB_FLUSH_ON_TASK_SWITCH, 0);
 	}
@@ -682,13 +684,13 @@ void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
  */
 void initialize_tlbstate_and_flush(void)
 {
-	int i;
+	int i, cpu = smp_processor_id();
 	struct mm_struct *mm = this_cpu_read(cpu_tlbstate.loaded_mm);
 	u64 tlb_gen = atomic64_read(&init_mm.context.tlb_gen);
 	unsigned long cr3 = __read_cr3();
 
 	/* Assert that CR3 already references the right mm. */
-	WARN_ON((cr3 & CR3_ADDR_MASK) != __pa(mm->pgd));
+	WARN_ON((cr3 & CR3_ADDR_MASK) != __pa(mm->pcpu_pgds[cpu]));
 
 	/*
 	 * Assert that CR4.PCIDE is set if needed.  (CR4.PCIDE initialization
@@ -699,7 +701,7 @@ void initialize_tlbstate_and_flush(void)
 		!(cr4_read_shadow() & X86_CR4_PCIDE));
 
 	/* Force ASID 0 and force a TLB flush. */
-	write_cr3(build_cr3(mm->pgd, 0));
+	write_cr3(build_cr3(mm->pcpu_pgds[cpu], 0));
 
 	/* Reinitialize tlbstate. */
 	this_cpu_write(cpu_tlbstate.last_user_mm_spec, LAST_USER_MM_INIT);
@@ -1073,8 +1075,10 @@ void flush_tlb_kernel_range(unsigned long start, unsigned long end)
  */
 unsigned long __get_current_cr3_fast(void)
 {
-	unsigned long cr3 = build_cr3(this_cpu_read(cpu_tlbstate.loaded_mm)->pgd,
-		this_cpu_read(cpu_tlbstate.loaded_mm_asid));
+	int cpu = smp_processor_id();
+	unsigned long cr3;
+	cr3 = build_cr3(this_cpu_read(cpu_tlbstate.loaded_mm)->pcpu_pgds[cpu],
+			this_cpu_read(cpu_tlbstate.loaded_mm_asid));
 
 	/* For now, be very restrictive about when this can be called. */
 	VM_WARN_ON(in_nmi() || preemptible());
@@ -1256,6 +1260,7 @@ bool nmi_uaccess_okay(void)
 {
 	struct mm_struct *loaded_mm = this_cpu_read(cpu_tlbstate.loaded_mm);
 	struct mm_struct *current_mm = current->mm;
+	int cpu;
 
 	VM_WARN_ON_ONCE(!loaded_mm);
 
@@ -1272,7 +1277,9 @@ bool nmi_uaccess_okay(void)
 	if (loaded_mm != current_mm)
 		return false;
 
-	VM_WARN_ON_ONCE(current_mm->pgd != __va(read_cr3_pa()));
+	cpu = get_cpu();
+	VM_WARN_ON_ONCE(current_mm->pcpu_pgds[cpu] != __va(read_cr3_pa()));
+	put_cpu();
 
 	return true;
 }

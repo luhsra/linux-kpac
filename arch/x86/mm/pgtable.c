@@ -423,16 +423,20 @@ static inline void _pgd_free(pgd_t *pgd)
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	pgd_t *pgd;
+	int cpu;
 	pmd_t *u_pmds[MAX_PREALLOCATED_USER_PMDS];
 	pmd_t *pmds[MAX_PREALLOCATED_PMDS];
 
-	pgd = _pgd_alloc();
+	mm->pgd = _pgd_alloc();
 
-	if (pgd == NULL)
+	if (mm->pgd == NULL)
 		goto out;
 
-	mm->pgd = pgd;
+	for_each_present_cpu(cpu) {
+		mm->pcpu_pgds[cpu] = _pgd_alloc();
+		if (mm->pcpu_pgds[cpu] == NULL)
+			goto out_free_pgd;
+	}
 
 	if (preallocate_pmds(mm, pmds, PREALLOCATED_PMDS) != 0)
 		goto out_free_pgd;
@@ -450,26 +454,41 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	 */
 	spin_lock(&pgd_lock);
 
-	pgd_ctor(mm, pgd);
-	pgd_prepopulate_pmd(mm, pgd, pmds);
-	pgd_prepopulate_user_pmd(mm, pgd, u_pmds);
+	pgd_ctor(mm, mm->pgd);
+	for_each_present_cpu(cpu) {
+		pgd_ctor(mm, mm->pcpu_pgds[cpu]);
+	}
+	pgd_prepopulate_pmd(mm, mm->pgd, pmds);
+	pgd_prepopulate_user_pmd(mm, mm->pgd, u_pmds);
 
 	spin_unlock(&pgd_lock);
 
-	return pgd;
+	return mm->pgd;
 
 out_free_user_pmds:
 	free_pmds(mm, u_pmds, PREALLOCATED_USER_PMDS);
 out_free_pmds:
 	free_pmds(mm, pmds, PREALLOCATED_PMDS);
 out_free_pgd:
-	_pgd_free(pgd);
+	for_each_present_cpu(cpu) {
+		if (mm->pcpu_pgds[cpu])
+			_pgd_free(mm->pcpu_pgds[cpu]);
+		mm->pcpu_pgds[cpu] = NULL;
+	}
+	_pgd_free(mm->pgd);
+	mm->pgd = NULL;
 out:
 	return NULL;
 }
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
+	int cpu;
+	for_each_present_cpu(cpu) {
+		pgd_dtor(mm->pcpu_pgds[cpu]);
+		_pgd_free(mm->pcpu_pgds[cpu]);
+	}
+
 	pgd_mop_up_pmds(mm, pgd);
 	pgd_dtor(pgd);
 	paravirt_pgd_free(mm, pgd);

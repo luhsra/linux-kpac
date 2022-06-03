@@ -475,8 +475,7 @@ struct mm_struct {
 		unsigned long task_size;	/* size of task vm space */
 		unsigned long highest_vm_end;	/* highest vma end address */
 		pgd_t * pgd;
-
-		struct vm_area_struct *kpac_vma;
+		pgd_t * pcpu_pgds[NR_CPUS];
 
 #ifdef CONFIG_MEMBARRIER
 		/**

@@ -46,6 +46,22 @@ extern gfp_t __userpte_alloc_gfp;
 #endif
 
 /*
+ * Mirror the new pgd entry for all CPUs in the mm.
+ */
+static inline void pgd_clone_pcpu(struct mm_struct *mm, pgd_t *pgd)
+{
+	/*
+	 * Reconstruct the entry with proper flags.  Simple copy would get us
+	 * the crippled PTI version with the NX bit set.
+	 */
+	pgd_t entry = __pgd(pgd_val(*pgd) & PTE_PFN_MASK | _PAGE_TABLE);
+	int cpu, offset = offset_in_page(pgd) / sizeof(pgd_t);
+
+	for_each_possible_cpu(cpu)
+		set_pgd(mm->pcpu_pgds[cpu] + offset, entry);
+}
+
+/*
  * Allocate and free page tables.
  */
 extern pgd_t *pgd_alloc(struct mm_struct *);
@@ -114,6 +130,9 @@ static inline void p4d_populate(struct mm_struct *mm, p4d_t *p4d, pud_t *pud)
 {
 	paravirt_alloc_pud(mm, __pa(pud) >> PAGE_SHIFT);
 	set_p4d(p4d, __p4d(_PAGE_TABLE | __pa(pud)));
+
+	if (!pgtable_l5_enabled())
+		pgd_clone_pcpu(mm, (pgd_t *) p4d);
 }
 
 static inline void p4d_populate_safe(struct mm_struct *mm, p4d_t *p4d, pud_t *pud)
@@ -137,6 +156,8 @@ static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, p4d_t *p4d)
 		return;
 	paravirt_alloc_p4d(mm, __pa(p4d) >> PAGE_SHIFT);
 	set_pgd(pgd, __pgd(_PAGE_TABLE | __pa(p4d)));
+
+	pgd_clone_pcpu(mm, pgd);
 }
 
 static inline void pgd_populate_safe(struct mm_struct *mm, pgd_t *pgd, p4d_t *p4d)

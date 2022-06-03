@@ -3,27 +3,17 @@
 #include <linux/freezer.h>
 #include <linux/mm.h>
 #include <linux/rmap.h>
+#include <asm/pgalloc.h>
 
-#define PLAIN_MASK  0x0000FFFFFFFFFFFFUL
-#define CIPHER_MASK 0xFFFF000000000000UL
+#define KPAC_CPU	3
+#define KPAC_BASE	0x9AC00000000		/* Occupies it's own pgd. */
+#define KPAC_VM_FLAGS	\
+	(VM_READ|VM_MAYREAD|VM_WRITE|VM_MAYWRITE|VM_PFNMAP|VM_SHARED)
 
-enum {
-    DEV_STANDBY = 0,
-    DEV_PAC,
-    DEV_AUT,
+enum kpac_ops {
+	OP_PAC = 1,
+	OP_AUT = 2
 };
-
-enum {
-    PAC_STATE = 0,
-    PAC_PLAIN,
-    PAC_TWEAK,
-    PAC_CIPH,
-};
-
-#define KPAC_CPU 3
-#define KPAC_BASE 0xA000000UL
-#define KPAC_VM_FLAGS \
-	(VM_READ|VM_MAYREAD|VM_WRITE|VM_MAYWRITE|VM_MIXEDMAP|VM_SHARED)
 
 static struct task_struct *kpacd_thread;
 static DEFINE_MUTEX(kpacd_mutex);
@@ -32,43 +22,18 @@ static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 			     struct vm_area_struct *vma,
 			     struct vm_fault *vmf)
 {
-	return VM_FAULT_SIGBUS;
+	WARN_ON_ONCE(1);
+	return VM_FAULT_SIGSEGV;
 }
 
 static const struct vm_special_mapping kpac_sm = {
-	.name = "kpac",
+	.name = "[kpac]",
 	.fault = kpac_fault,
 };
 
 static struct cpumask kpac_cpumask;
-static struct page *kpac_pages[NR_CPUS];
 static unsigned long *kpac_areas[NR_CPUS];
-
-/*
- * Preallocate page tables for the specified user address.
- */
-static int alloc_pgtables(struct mm_struct *mm, unsigned long addr)
-{
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
-
-	pgd = pgd_offset(mm, addr);
-	p4d = p4d_alloc(mm, pgd, addr);
-	if (!p4d)
-		return -ENOMEM;
-	pud = pud_alloc(mm, p4d, addr);
-	if (!pud)
-		return -ENOMEM;
-	pmd = pmd_alloc(mm, pud, addr);
-	if (!pmd)
-		return -ENOMEM;
-	if (pte_alloc(mm, pmd))
-		return -ENOMEM;
-
-	return 0;
-}
+static p4d_t *kpac_p4ds[NR_CPUS];
 
 /**
  * kpac_switch - Restore kpac context on task switch.
@@ -92,54 +57,31 @@ void kpac_switch(struct task_struct *next)
 
 	if (prev->mm) {
 		unsigned long *dst = prev->kpac_context.regs;
-		memcpy(dst, area, sizeof(*dst) * KPAC_NR_REGS);
+		memcpy(dst, area, sizeof(*dst) * KPAC_NREGS);
 	}
 	if (next->mm) {
 		unsigned long *src = next->kpac_context.regs;
-		memcpy(area, src, sizeof(*src) * KPAC_NR_REGS);
+		memcpy(area, src, sizeof(*src) * KPAC_NREGS);
 	}
 }
 
-/**
- * kpac_migrate - Replace kpac page of the task on migration.
- * @p: Task being migrated.
- * @cpu: Destination cpu of the migration.
- */
-void kpac_migrate(struct task_struct *p, int cpu)
+bool vma_is_kpac_mapping(struct vm_area_struct *vma)
 {
-	struct mm_struct *mm = p->mm;
-	struct page *old_page = NULL;
-	struct page *new_page = kpac_pages[cpu];
-	pte_t *pte, entry;
-	spinlock_t *ptl;
+	return vma_is_special_mapping(vma, &kpac_sm);
+}
 
-	/* Skip kernel threads and tasks where kpac wasn't initialized */
-	if (!mm || !mm->kpac_vma)
-		return;
-
-	BUG_ON(!new_page);
-
-	get_page(new_page);
-	pte = get_locked_pte(mm, KPAC_BASE, &ptl);
-
-	entry = ptep_get_and_clear(mm, KPAC_BASE, pte);
-	if (!pte_none(entry))
-		old_page = pte_page(entry);
-	else
-		inc_mm_counter(mm, MM_FILEPAGES);
-
-	page_add_file_rmap(new_page, false);
-	entry = mk_pte(new_page, mm->kpac_vma->vm_page_prot);
-	set_pte_at(mm, KPAC_BASE, pte, entry);
-
-	pte_unmap_unlock(pte, ptl);
-
-	if (old_page) {
-		page_remove_rmap(old_page, false);
-		put_page(old_page);
+/**
+ * kpac_install_pgds - Install kpac entries into the percpu page directories.
+ * @mm: Address space to be populated.
+ */
+void kpac_install_pgds(struct mm_struct *mm)
+{
+	int cpu;
+	for_each_present_cpu(cpu) {
+		pgd_t *pgd = pgd_offset_cpu(mm, cpu, KPAC_BASE);
+		p4d_t *p4d = kpac_p4ds[cpu];
+		set_pgd(pgd, __pgd(_PAGE_TABLE | __pa(p4d)));
 	}
-
-	return;
 }
 
 /**
@@ -152,24 +94,18 @@ int kpac_exec(void)
 	int ret = 0;
 
 	mmap_write_lock(mm);
-	vma = _install_special_mapping(mm, KPAC_BASE, PAGE_SIZE, KPAC_VM_FLAGS,
-				       &kpac_sm);
+	/*
+	 * Reserve the whole PGD range to avoid conflicts with other mappings
+	 * and complain loudly in case someone insists on using this area.
+	 */
+	vma = _install_special_mapping(mm, KPAC_BASE & PGDIR_MASK, PGDIR_SIZE,
+				       KPAC_VM_FLAGS, &kpac_sm);
 	if (IS_ERR(vma)) {
-		 ret = PTR_ERR(vma);
-		 goto out_unlock;
+		ret = PTR_ERR(vma);
+		goto out_unlock;
 	}
 
-	mm->kpac_vma = vma;
-
-	/* Prepare page tables here so we can do page insertion during
-	 * task migrations atomically. */
-	ret = alloc_pgtables(mm, KPAC_BASE);
-	if (ret)
-		goto out_unlock;
-
-	preempt_disable();
-	kpac_migrate(current, smp_processor_id());
-	preempt_enable();
+	kpac_install_pgds(mm);
 
 	memset(&current->kpac_context, 0, sizeof(current->kpac_context));
 
@@ -187,22 +123,20 @@ static void kpacd_poll(void)
 		preempt_disable();
 		user = kpac_areas[cpu];
 
-		state = smp_load_acquire(&user[PAC_STATE]);
+		state = smp_load_acquire(&user[KPAC_STATE]);
 		if (state) {
 			switch (state) {
-			case DEV_PAC:
-				user[PAC_CIPH] = user[PAC_PLAIN];
+			case OP_PAC:
+				user[KPAC_CIPHER] = user[KPAC_PLAIN];
 				trace_printk("#%d: [%lx %lx] -> %lx\n", cpu, user[1], user[2], user[3]);
 				break;
-			case DEV_AUT:
-				user[PAC_PLAIN] = user[PAC_CIPH];
+			case OP_AUT:
+				user[KPAC_PLAIN] = user[KPAC_CIPHER];
 				trace_printk("#%d: %lx <- [%lx %lx]\n", cpu, user[1], user[2], user[3]);
 				break;
-			default:
-				WARN_ON(1);
 			}
 
-			smp_store_release(&user[PAC_STATE], DEV_STANDBY);
+			smp_store_release(&user[KPAC_STATE], 0);
 		}
 		preempt_enable();
 
@@ -251,31 +185,78 @@ fail:
 	return err;
 }
 
+/*
+ * Create p4d and the underlying page tables and install a single pfn there.
+ */
+static p4d_t *kpac_alloc_pgtables(unsigned long addr, unsigned long pfn,
+				  pgprot_t pgprot)
+{
+	p4d_t p4d, *p4dp;
+	pud_t pud, *pudp;
+	pmd_t pmd, *pmdp;
+	pte_t pte, *ptep;
+
+	ptep = pte_alloc_one_kernel(&init_mm);
+	if (!ptep)
+		goto out_nopte;
+	pte = pfn_pte(pfn, pgprot);
+	set_pte(ptep+pte_index(addr), pte);
+
+	pmdp = pmd_alloc_one(&init_mm, addr);
+	if (!pmdp)
+		goto out_nopmd;
+	pmd = __pmd(_PAGE_TABLE | __pa(ptep));
+	set_pmd(pmdp+pmd_index(addr), pmd);
+
+	pudp = pud_alloc_one(&init_mm, addr);
+	if (!pudp)
+		goto out_nopud;
+	pud = __pud(_PAGE_TABLE | __pa(pmdp));
+	set_pud(pudp+pud_index(addr), pud);
+
+	if (mm_p4d_folded(&init_mm))
+		return (p4d_t *) pudp;
+
+	p4dp = p4d_alloc_one(&init_mm, addr);
+	if (!p4dp)
+		goto out_nop4d;
+	p4d = __p4d(_PAGE_TABLE | __pa(pudp));
+	set_p4d(p4dp+p4d_index(addr), p4d);
+
+	return p4dp;
+
+out_nop4d:
+	pud_free(&init_mm, pudp);
+out_nopud:
+	pmd_free(&init_mm, pmdp);
+out_nopmd:
+	pte_free_kernel(&init_mm, ptep);
+out_nopte:
+	return NULL;
+}
+
 static int __init kpac_init(void)
 {
-	struct page *page;
+	unsigned long *area;
 	int cpu;
 
 	for_each_present_cpu(cpu) {
-		page = alloc_page(GFP_USER | __GFP_ZERO);
-		if (!page)
+		area = (unsigned long *) get_zeroed_page(GFP_USER);
+		if (!area)
 			goto out_nomem;
-		kpac_pages[cpu] = page;
-		kpac_areas[cpu] = kmap(page);
-		pr_info("kpac: allocated %lx for CPU%d\n", page_to_pfn(page), cpu);
+		pr_info("kpac: allocated %lx for CPU%d\n", __pa(area), cpu);
+		kpac_areas[cpu] = area;
+		kpac_p4ds[cpu] = kpac_alloc_pgtables(KPAC_BASE, PHYS_PFN(__pa(area)),
+						     vm_get_page_prot(KPAC_VM_FLAGS));
 	}
 
 	return start_stop_kpacd();
 
 out_nomem:
 	for_each_present_cpu(cpu) {
-		page = kpac_pages[cpu];
-		kpac_pages[cpu] = NULL;
+		area = kpac_areas[cpu];
 		kpac_areas[cpu] = NULL;
-		if (page) {
-			kunmap(page);
-			__free_page(page);
-		}
+		free_page((unsigned long) area);
 	}
 
 	return -ENOMEM;
