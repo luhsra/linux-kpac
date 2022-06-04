@@ -15,6 +15,8 @@ enum kpac_ops {
 	OP_AUT = 2
 };
 
+static bool kpac_initialized = false;
+
 static struct task_struct *kpacd_thread;
 static DEFINE_MUTEX(kpacd_mutex);
 
@@ -31,7 +33,6 @@ static const struct vm_special_mapping kpac_sm = {
 	.fault = kpac_fault,
 };
 
-static struct cpumask kpac_cpumask;
 static unsigned long *kpac_areas[NR_CPUS];
 static p4d_t *kpac_p4ds[NR_CPUS];
 
@@ -48,7 +49,7 @@ void kpac_switch(struct task_struct *next)
 	struct task_struct *prev = current;
 	unsigned long *area = kpac_areas[cpu];
 
-	if (!area)
+	if (unlikely(!kpac_initialized))
 		return;
 
 	/* Let the kpacd thread finish authentication. */
@@ -93,6 +94,9 @@ int kpac_exec(void)
 	struct vm_area_struct *vma;
 	int ret = 0;
 
+	if (unlikely(!kpac_initialized))
+		return 0;
+
 	mmap_write_lock(mm);
 	/*
 	 * Reserve the whole PGD range to avoid conflicts with other mappings
@@ -114,11 +118,11 @@ out_unlock:
 	return ret;
 }
 
-static void kpacd_poll(void)
+static void kpacd_poll(struct cpumask *cpumask)
 {
 	int cpu;
 
-	for_each_cpu(cpu, &kpac_cpumask) {
+	for_each_cpu(cpu, cpumask) {
 		unsigned long *user, state;
 		preempt_disable();
 		user = kpac_areas[cpu];
@@ -146,15 +150,17 @@ static void kpacd_poll(void)
 
 static int kpacd(void *none)
 {
+	struct cpumask cpumask;
+
 	/* Get the max time-sharing priority */
 	set_user_nice(current, MIN_NICE);
 
 	/* Exclude our CPU from the cpumask */
-	cpumask_copy(&kpac_cpumask, cpu_online_mask);
-	cpumask_clear_cpu(smp_processor_id(), &kpac_cpumask);
+	cpumask_copy(&cpumask, cpu_online_mask);
+	cpumask_clear_cpu(smp_processor_id(), &cpumask);
 
 	while (!kthread_should_stop()) {
-		kpacd_poll();
+		kpacd_poll(&cpumask);
 		cond_resched();
 	}
 
@@ -170,7 +176,7 @@ static int start_stop_kpacd(void)
 		kpacd_thread = kthread_run_on_cpu(kpacd, NULL, KPAC_CPU, "kpacd");
 
 		if (IS_ERR(kpacd_thread)) {
-			pr_err("kpacd: kthread_run(kpacd) failed\n");
+			pr_err("kpac: kthread_run(kpacd) failed\n");
 			err = PTR_ERR(kpacd_thread);
 			kpacd_thread = NULL;
 			goto fail;
@@ -235,29 +241,54 @@ out_nopte:
 	return NULL;
 }
 
+static void kpac_free_pgtables(p4d_t *p4d, unsigned long addr)
+{
+	pud_t *pud = mm_p4d_folded(&init_mm)
+		? (pud_t *) p4d
+		: p4d_pgtable(*(p4d + p4d_index(addr)));
+	pmd_t *pmd = pud_pgtable(*(pud + pud_index(addr)));
+	pte_t *pte = (pte_t *) pmd_page_vaddr(*(pmd + pmd_index(addr)));
+
+	p4d_free(&init_mm, p4d);
+	pud_free(&init_mm, pud);
+	pmd_free(&init_mm, pmd);
+	pte_free_kernel(&init_mm, pte);
+}
+
 static int __init kpac_init(void)
 {
-	unsigned long *area;
 	int cpu;
 
 	for_each_present_cpu(cpu) {
+		unsigned long *area, pfn;
 		area = (unsigned long *) get_zeroed_page(GFP_USER);
 		if (!area)
 			goto out_nomem;
-		pr_info("kpac: allocated %lx for CPU%d\n", __pa(area), cpu);
-		kpac_areas[cpu] = area;
-		kpac_p4ds[cpu] = kpac_alloc_pgtables(KPAC_BASE, PHYS_PFN(__pa(area)),
+		pfn = PHYS_PFN(__pa(area));
+		kpac_p4ds[cpu] = kpac_alloc_pgtables(KPAC_BASE, pfn,
 						     vm_get_page_prot(KPAC_VM_FLAGS));
+		kpac_areas[cpu] = area;
+		pr_info("kpac: allocated %lx for CPU%d\n", pfn, cpu);
 	}
 
+	smp_store_release(&kpac_initialized, true);
 	return start_stop_kpacd();
 
 out_nomem:
 	for_each_present_cpu(cpu) {
-		area = kpac_areas[cpu];
+		unsigned long *area = kpac_areas[cpu];
+		p4d_t *p4d = kpac_p4ds[cpu];
+
+		kpac_p4ds[cpu] = NULL;
 		kpac_areas[cpu] = NULL;
-		free_page((unsigned long) area);
+
+		if (p4d)
+			kpac_free_pgtables(p4d, KPAC_BASE);
+		if (area)
+			free_page((unsigned long) area);
 	}
+
+	pr_err("kpac: initialization failed\n");
 
 	return -ENOMEM;
 }
