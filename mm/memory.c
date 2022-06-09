@@ -1239,7 +1239,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 	int ret;
 
 	if (vma_is_kpac_mapping(src_vma)) {
-		kpac_install_pgds(dst_vma->vm_mm);
+		kpac_populate_pgds(dst_vma->vm_mm);
 		return 0;
 	}
 

@@ -153,16 +153,16 @@ bool vma_is_kpac_mapping(struct vm_area_struct *vma)
 }
 
 /**
- * kpac_install_pgds - Install kpac entries into the percpu page directories.
+ * kpac_populate_pgds - Install kpac entries into the percpu page directories.
  * @mm: Address space to be populated.
  */
-void kpac_install_pgds(struct mm_struct *mm)
+void kpac_populate_pgds(struct mm_struct *mm)
 {
 	int cpu;
 	for_each_present_cpu(cpu) {
 		pgd_t *pgd = pgd_offset_cpu(mm, cpu, KPAC_BASE);
 		p4d_t *p4d = kpac_areas[cpu].p4d;
-		set_pgd(pgd, __pgd(_PAGE_TABLE | __pa(p4d)));
+		pgd_populate_one(mm, pgd, p4d);
 	}
 }
 
@@ -190,7 +190,7 @@ int kpac_exec(void)
 		goto out_unlock;
 	}
 
-	kpac_install_pgds(mm);
+	kpac_populate_pgds(mm);
 
 	memset(&current->kpac_context, 0, sizeof(current->kpac_context));
 
@@ -299,65 +299,81 @@ out_free:
 /*
  * Create p4d and the underlying page tables and install a single pfn there.
  */
-static p4d_t *kpac_alloc_pgtables(unsigned long addr, unsigned long pfn,
-				  pgprot_t pgprot)
+static p4d_t *kpac_alloc_pgtables(unsigned long addr, unsigned long pfn)
 {
-	p4d_t p4d, *p4dp;
-	pud_t pud, *pudp;
-	pmd_t pmd, *pmdp;
-	pte_t pte, *ptep;
+	p4d_t *p4dp __maybe_unused;
+	pud_t *pudp;
+	pmd_t *pmdp;
+	pte_t *ptep, pte;
+	pgtable_t pte_page;
 
-	ptep = pte_alloc_one_kernel(&init_mm);
-	if (!ptep)
+	pte = pfn_pte(pfn, vm_get_page_prot(KPAC_VM_FLAGS));
+	pte = pte_mkwrite(pte); /* Inhibit page faults due to software dirty
+				 * accounting. */
+
+	pte_page = pte_alloc_one(NULL);
+	if (!pte_page)
 		goto out_nopte;
-	pte = pfn_pte(pfn, pgprot);
+	ptep = page_address(pte_page);
 	set_pte(ptep+pte_index(addr), pte);
 
-	pmdp = pmd_alloc_one(&init_mm, addr);
+	pmdp = pmd_alloc_one(NULL, addr);
 	if (!pmdp)
 		goto out_nopmd;
-	pmd = __pmd(_PAGE_TABLE | __pa(ptep));
-	set_pmd(pmdp+pmd_index(addr), pmd);
+	pmd_populate(NULL, pmdp+pmd_index(addr), pte_page);
 
-	pudp = pud_alloc_one(&init_mm, addr);
+	pudp = pud_alloc_one(NULL, addr);
 	if (!pudp)
 		goto out_nopud;
-	pud = __pud(_PAGE_TABLE | __pa(pmdp));
-	set_pud(pudp+pud_index(addr), pud);
+	pud_populate(NULL, pudp+pud_index(addr), pmdp);
 
 	if (mm_p4d_folded(&init_mm))
 		return (p4d_t *) pudp;
 
-	p4dp = p4d_alloc_one(&init_mm, addr);
+#ifdef __PAGETABLE_P4D_FOLDED
+	BUG();
+#else
+	p4dp = p4d_alloc_one(NULL, addr);
 	if (!p4dp)
 		goto out_nop4d;
-	p4d = __p4d(_PAGE_TABLE | __pa(pudp));
-	set_p4d(p4dp+p4d_index(addr), p4d);
+	p4d_populate(NULL, p4dp+p4d_index(addr), pudp);
 
 	return p4dp;
 
 out_nop4d:
-	pud_free(&init_mm, pudp);
+	pud_free(NULL, pudp);
+#endif
 out_nopud:
-	pmd_free(&init_mm, pmdp);
+	pmd_free(NULL, pmdp);
 out_nopmd:
-	pte_free_kernel(&init_mm, ptep);
+	pte_free(NULL, pte_page);
 out_nopte:
 	return NULL;
 }
 
 static void kpac_free_pgtables(p4d_t *p4d, unsigned long addr)
 {
-	pud_t *pud = mm_p4d_folded(&init_mm)
-		? (pud_t *) p4d
-		: p4d_pgtable(*(p4d + p4d_index(addr)));
-	pmd_t *pmd = pud_pgtable(*(pud + pud_index(addr)));
-	pte_t *pte = (pte_t *) pmd_page_vaddr(*(pmd + pmd_index(addr)));
+	pud_t *pud;
+	pmd_t *pmd;
+	pgtable_t pte;
 
-	p4d_free(&init_mm, p4d);
-	pud_free(&init_mm, pud);
-	pmd_free(&init_mm, pmd);
-	pte_free_kernel(&init_mm, pte);
+	if (mm_p4d_folded(&init_mm)) {
+		pud = (pud_t *) p4d;
+	} else {
+#ifdef __PAGETABLE_P4D_FOLDED
+		BUG();
+#else
+		pud = p4d_pgtable(*(p4d + p4d_index(addr)));
+		p4d_free(NULL, p4d);
+#endif
+	}
+
+	pmd = pud_pgtable(*(pud + pud_index(addr)));
+	pud_free(NULL, pud);
+
+	pte = pmd_page(*(pmd + pmd_index(addr)));
+	pmd_free(NULL, pmd);
+	pte_free(NULL, pte);
 }
 
 /*
@@ -376,8 +392,7 @@ static int __init kpac_init(void)
 		if (!area)
 			goto out_nomem;
 		pfn = PHYS_PFN(__pa(area));
-		p4d = kpac_alloc_pgtables(KPAC_BASE, pfn,
-					  vm_get_page_prot(KPAC_VM_FLAGS));
+		p4d = kpac_alloc_pgtables(KPAC_BASE, pfn);
 
 		kpac_areas[cpu].mem = area;
 		kpac_areas[cpu].p4d = p4d;

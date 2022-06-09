@@ -17,7 +17,7 @@
 
 static struct kmem_cache *pgd_cache __ro_after_init;
 
-pgd_t *pgd_alloc(struct mm_struct *mm)
+static pgd_t *_pgd_alloc()
 {
 	gfp_t gfp = GFP_PGTABLE_USER;
 
@@ -27,12 +27,56 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 		return kmem_cache_alloc(pgd_cache, gfp);
 }
 
-void pgd_free(struct mm_struct *mm, pgd_t *pgd)
+static void _pgd_free(pgd_t *pgd)
 {
 	if (PGD_SIZE == PAGE_SIZE)
 		free_page((unsigned long)pgd);
 	else
 		kmem_cache_free(pgd_cache, pgd);
+}
+
+pgd_t *pgd_alloc(struct mm_struct *mm)
+{
+	int cpu;
+
+	mm->pgd = _pgd_alloc();
+
+	if (!mm->pgd)
+		goto out;
+
+	for_each_present_cpu(cpu) {
+		mm->pcpu_pgds[cpu] = _pgd_alloc();
+		if (!mm->pcpu_pgds[cpu])
+			goto out_free_pgd;
+	}
+
+	return mm->pgd;
+
+out_free_pgd:
+	for_each_present_cpu(cpu) {
+		if (mm->pcpu_pgds[cpu])
+			_pgd_free(mm->pcpu_pgds[cpu]);
+		mm->pcpu_pgds[cpu] = NULL;
+	}
+	_pgd_free(mm->pgd);
+	mm->pgd = NULL;
+
+out:
+	return NULL;
+}
+
+void pgd_free(struct mm_struct *mm, pgd_t *pgd)
+{
+	int cpu;
+
+	for_each_present_cpu(cpu) {
+		if (mm->pcpu_pgds[cpu])
+			_pgd_free(mm->pcpu_pgds[cpu]);
+		mm->pcpu_pgds[cpu] = NULL;
+	}
+
+	_pgd_free(mm->pgd);
+	mm->pgd = NULL;
 }
 
 void __init pgtable_cache_init(void)

@@ -17,7 +17,7 @@ struct kpac_context {
 };
 
 bool vma_is_kpac_mapping(struct vm_area_struct *vma);
-void kpac_install_pgds(struct mm_struct *mm);
+void kpac_populate_pgds(struct mm_struct *mm);
 void kpac_switch(struct task_struct *p);
 void kpac_migrate(struct task_struct *p, int cpu);
 int kpac_exec(void);

@@ -62,6 +62,14 @@ static inline void pgd_clone_pcpu(struct mm_struct *mm, pgd_t *pgd)
 }
 
 /*
+ * Populate a single pgd entry without mirroring it in per-CPU pgds.
+ */
+static inline void pgd_populate_one(struct mm_struct *mm, pgd_t *pgd, p4d_t *p4d)
+{
+	set_pgd(pgd, __pgd(_PAGE_TABLE | __pa(p4d)));
+}
+
+/*
  * Allocate and free page tables.
  */
 extern pgd_t *pgd_alloc(struct mm_struct *);

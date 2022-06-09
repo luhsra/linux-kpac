@@ -96,6 +96,7 @@ static inline void __cpu_set_tcr_t0sz(unsigned long t0sz)
  */
 static inline void cpu_uninstall_idmap(void)
 {
+	unsigned int cpu = smp_processor_id();
 	struct mm_struct *mm = current->active_mm;
 
 	cpu_set_reserved_ttbr0();
@@ -103,7 +104,7 @@ static inline void cpu_uninstall_idmap(void)
 	cpu_set_default_tcr_t0sz();
 
 	if (mm != &init_mm && !system_uses_ttbr0_pan())
-		cpu_switch_mm(mm->pgd, mm);
+		cpu_switch_mm(mm->pcpu_pgds[cpu], mm);
 }
 
 static inline void cpu_install_idmap(void)

@@ -215,7 +215,7 @@ set_asid:
 void check_and_switch_context(struct mm_struct *mm)
 {
 	unsigned long flags;
-	unsigned int cpu;
+	unsigned int cpu = smp_processor_id();
 	u64 asid, old_active_asid;
 
 	if (system_supports_cnp())
@@ -251,7 +251,6 @@ void check_and_switch_context(struct mm_struct *mm)
 		atomic64_set(&mm->context.id, asid);
 	}
 
-	cpu = smp_processor_id();
 	if (cpumask_test_and_clear_cpu(cpu, &tlb_flush_pending))
 		local_flush_tlb_all();
 
@@ -267,7 +266,7 @@ switch_mm_fastpath:
 	 * emulating PAN.
 	 */
 	if (!system_uses_ttbr0_pan())
-		cpu_switch_mm(mm->pgd, mm);
+		cpu_switch_mm(mm->pcpu_pgds[cpu], mm);
 }
 
 unsigned long arm64_mm_context_get(struct mm_struct *mm)

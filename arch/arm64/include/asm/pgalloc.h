@@ -18,6 +18,16 @@
 
 #define PGD_SIZE	(PTRS_PER_PGD * sizeof(pgd_t))
 
+/*
+ * Mirror the new pgd entry for all CPUs in the mm.
+ */
+static inline void pgd_clone_pcpu(struct mm_struct *mm, pgd_t *pgd)
+{
+	int cpu, offset = offset_in_page(pgd) / sizeof(pgd_t);
+	for_each_possible_cpu(cpu)
+		set_pgd(mm->pcpu_pgds[cpu] + offset, *pgd);
+}
+
 #if CONFIG_PGTABLE_LEVELS > 2
 
 static inline void __pud_populate(pud_t *pudp, phys_addr_t pmdp, pudval_t prot)
@@ -52,7 +62,24 @@ static inline void p4d_populate(struct mm_struct *mm, p4d_t *p4dp, pud_t *pudp)
 
 	p4dval |= (mm == &init_mm) ? P4D_TABLE_UXN : P4D_TABLE_PXN;
 	__p4d_populate(p4dp, __pa(pudp), p4dval);
+
+#if CONFIG_PGTABLE_LEVELS == 4
+	pgd_clone_pcpu(mm, (pgd_t *) p4dp);
+#endif
 }
+
+#if CONFIG_PGTABLE_LEVELS == 4
+/*
+ * Populate a single pgd entry without mirroring it in per-CPU pgds.
+ */
+static inline void pgd_populate_one(struct mm_struct *mm, pgd_t *pgdp, p4d_t *p4dp)
+{
+	p4dval_t p4dval = P4D_TYPE_TABLE;
+
+	p4dval |= (mm == &init_mm) ? P4D_TABLE_UXN : P4D_TABLE_PXN;
+	__p4d_populate((p4d_t *) pgdp, __pa(p4dp), p4dval);
+}
+#endif
 #else
 static inline void __p4d_populate(p4d_t *p4dp, phys_addr_t pudp, p4dval_t prot)
 {
