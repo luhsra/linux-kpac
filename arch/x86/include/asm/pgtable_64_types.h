@@ -102,6 +102,12 @@ extern unsigned int ptrs_per_p4d;
 #define PGDIR_SIZE	(_AC(1, UL) << PGDIR_SHIFT)
 #define PGDIR_MASK	(~(PGDIR_SIZE - 1))
 
+#ifdef CONFIG_X86_5LEVEL
+#define VA_BITS		57
+#else /* CONFIG_X86_5LEVEL */
+#define VA_BITS		48
+#endif /* CONFIG_X86_5LEVEL */
+
 /*
  * See Documentation/x86/x86_64/mm.rst for a description of the memory map.
  *
