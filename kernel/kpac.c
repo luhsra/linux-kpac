@@ -3,6 +3,9 @@
 #include <linux/freezer.h>
 #include <linux/mm.h>
 #include <linux/rmap.h>
+#include <linux/kpac.h>
+#include <linux/kpac/backend.h>
+
 #include <asm/pgalloc.h>
 
 #define KPAC_CPU	3
@@ -111,11 +114,11 @@ static const struct vm_special_mapping kpac_sm = {
 };
 
 /* Memory areas used for communication with userspace. */
-struct kpac_area {
-	unsigned long	*mem;	/* Contents mapped in kernel */
-	p4d_t		*p4d;	/* P4Ds for insertion in userspace */
+struct kpac_page {
+	struct kpac_area	*area;	/* Contents mapped in kernel */
+	p4d_t			*p4d;	/* P4Ds for insertion in userspace */
 };
-static struct kpac_area kpac_areas[NR_CPUS];
+static struct kpac_page kpac_pages[NR_CPUS];
 
 /**
  * kpac_switch - Restore kpac context on task switch.
@@ -128,22 +131,22 @@ void kpac_switch(struct task_struct *next)
 {
 	int cpu = smp_processor_id();
 	struct task_struct *prev = current;
-	unsigned long *area = kpac_areas[cpu].mem;
+	struct kpac_area *area = kpac_pages[cpu].area;
 
 	if (unlikely(!kpac_initialized))
 		return;
 
 	/* Let the kpacd thread finish authentication. */
-	while (smp_load_acquire(&area[0]))
+	while (smp_load_acquire(&area->status))
 		cpu_relax();
 
 	if (prev->mm) {
-		unsigned long *dst = prev->kpac_context.regs;
-		memcpy(dst, area, sizeof(*dst) * KPAC_NREGS);
+		struct kpac_area *dst = &prev->kpac_context.area;
+		memcpy(dst, area, sizeof(*dst));
 	}
 	if (next->mm) {
-		unsigned long *src = next->kpac_context.regs;
-		memcpy(area, src, sizeof(*src) * KPAC_NREGS);
+		struct kpac_area *src = &next->kpac_context.area;
+		memcpy(area, src, sizeof(*src));
 	}
 }
 
@@ -161,7 +164,7 @@ void kpac_populate_pgds(struct mm_struct *mm)
 	int cpu;
 	for_each_present_cpu(cpu) {
 		pgd_t *pgd = pgd_offset_cpu(mm, cpu, KPAC_BASE);
-		p4d_t *p4d = kpac_areas[cpu].p4d;
+		p4d_t *p4d = kpac_pages[cpu].p4d;
 		pgd_populate_one(mm, pgd, p4d);
 	}
 }
@@ -193,42 +196,52 @@ int kpac_exec(void)
 	kpac_populate_pgds(mm);
 
 	memset(&current->kpac_context, 0, sizeof(current->kpac_context));
+	kpac_reset_key(&current->kpac_context.key);
 
 out_unlock:
 	mmap_write_unlock(mm);
 	return ret;
 }
 
-static void kpacd_poll(struct kpacd *kpacd)
+static inline void kpacd_poll_one(struct kpacd *kpacd, int cpu)
+{
+	struct kpac_area *area = kpac_pages[cpu].area;
+
+	unsigned long state = smp_load_acquire(&area->status);
+	if (state) {
+		struct task_struct *p = per_cpu(current_task, cpu);
+		struct kpac_key *key = &p->kpac_context.key;
+
+		switch (state) {
+		case OP_PAC:
+			area->cipher = kpac_pac(area->plain, area->tweak, key);
+			kpacd->stat.nr_pac++;
+			/* trace_printk("#%d: [%lx %lx] -> %lx\n", cpu, */
+			/* 	     area->plain, area->tweak, area->cipher); */
+			break;
+		case OP_AUT:
+			area->plain = kpac_aut(area->cipher, area->tweak, key);
+			kpacd->stat.nr_aut++;
+			/* trace_printk("#%d: %lx <- [%lx %lx]\n", cpu, */
+			/* 	     area->plain, area->tweak, area->cipher); */
+			break;
+		}
+
+		smp_store_release(&area->status, 0);
+	}
+
+	cpu_relax();
+}
+
+static inline void kpacd_poll(struct kpacd *kpacd)
 {
 	int cpu;
 
-	for_each_cpu(cpu, &kpacd->cpumask) {
-		unsigned long *user, state;
-		preempt_disable();
+	preempt_disable();
+	for_each_cpu(cpu, &kpacd->cpumask)
+		kpacd_poll_one(kpacd, cpu);
 
-		user = kpac_areas[cpu].mem;
-		state = smp_load_acquire(&user[KPAC_STATE]);
-		if (state) {
-			switch (state) {
-			case OP_PAC:
-				user[KPAC_CIPHER] = user[KPAC_PLAIN];
-				trace_printk("#%d: [%lx %lx] -> %lx\n", cpu, user[1], user[2], user[3]);
-				kpacd->stat.nr_pac++;
-				break;
-			case OP_AUT:
-				user[KPAC_PLAIN] = user[KPAC_CIPHER];
-				trace_printk("#%d: %lx <- [%lx %lx]\n", cpu, user[1], user[2], user[3]);
-				kpacd->stat.nr_aut++;
-				break;
-			}
-
-			smp_store_release(&user[KPAC_STATE], 0);
-		}
-		preempt_enable_no_resched();
-
-		cpu_relax();
-	}
+	preempt_enable_no_resched();
 }
 
 /*
@@ -248,8 +261,10 @@ static int kpacd_main(void *__kpacd)
 	cpumask_clear_cpu(smp_processor_id(), &kpacd->cpumask);
 
 	while (!kthread_should_stop()) {
+		if (need_resched())
+			cond_resched();
+
 		kpacd_poll(kpacd);
-		cond_resched();
 	}
 
 	kobject_put(&kpacd->kobj);
@@ -386,16 +401,18 @@ static int __init kpac_init(void)
 	int cpu;
 
 	for_each_present_cpu(cpu) {
-		unsigned long *area, pfn;
+		struct kpac_area *area;
+		unsigned long pfn;
 		p4d_t *p4d;
-		area = (unsigned long *) get_zeroed_page(GFP_USER);
+
+		area = (struct kpac_area *) get_zeroed_page(GFP_USER);
 		if (!area)
 			goto out_nomem;
 		pfn = PHYS_PFN(__pa(area));
 		p4d = kpac_alloc_pgtables(KPAC_BASE, pfn);
 
-		kpac_areas[cpu].mem = area;
-		kpac_areas[cpu].p4d = p4d;
+		kpac_pages[cpu].area = area;
+		kpac_pages[cpu].p4d = p4d;
 
 		pr_info("kpac: allocated %lx for CPU%d\n", pfn, cpu);
 	}
@@ -411,11 +428,11 @@ static int __init kpac_init(void)
 
 out_nomem:
 	for_each_present_cpu(cpu) {
-		struct kpac_area *area = &kpac_areas[cpu];
-		if (area->p4d)
-			kpac_free_pgtables(area->p4d, KPAC_BASE);
-		if (area->mem)
-			free_page((unsigned long) area->mem);
+		struct kpac_page *page = &kpac_pages[cpu];
+		if (page->p4d)
+			kpac_free_pgtables(page->p4d, KPAC_BASE);
+		if (page->area)
+			free_page((unsigned long) page->area);
 	}
 
 	pr_err("kpac: initialization failed\n");
