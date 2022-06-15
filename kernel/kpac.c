@@ -113,12 +113,18 @@ static const struct vm_special_mapping kpac_sm = {
 	.fault = kpac_fault,
 };
 
-/* Memory areas used for communication with userspace. */
+/* Per-CPU pages for communication with userspace tasks. */
 struct kpac_page {
-	struct kpac_area	*area;	/* Contents mapped in kernel */
-	p4d_t			*p4d;	/* P4Ds for insertion in userspace */
+	/* Contents mapped in kernel: */
+	struct kpac_area	*area ____cacheline_aligned;
+
+	/* Task currently associated with this page: */
+	struct task_struct	*task;
+
+	/* P4Ds for insertion in userspace pgds: */
+	p4d_t			*p4d;
 };
-static struct kpac_page kpac_pages[NR_CPUS];
+static struct kpac_page kpac_pages[NR_CPUS] __cacheline_aligned;
 
 /**
  * kpac_switch - Restore kpac context on task switch.
@@ -131,7 +137,8 @@ void kpac_switch(struct task_struct *next)
 {
 	int cpu = smp_processor_id();
 	struct task_struct *prev = current;
-	struct kpac_area *area = kpac_pages[cpu].area;
+	struct kpac_page *page = &kpac_pages[cpu];
+	struct kpac_area *area = page->area;
 
 	if (unlikely(!kpac_initialized))
 		return;
@@ -148,6 +155,8 @@ void kpac_switch(struct task_struct *next)
 		struct kpac_area *src = &next->kpac_context.area;
 		memcpy(area, src, sizeof(*src));
 	}
+
+	page->task = next;
 }
 
 bool vma_is_kpac_mapping(struct vm_area_struct *vma)
@@ -209,7 +218,7 @@ static inline void kpacd_poll_one(struct kpacd *kpacd, int cpu)
 
 	unsigned long state = smp_load_acquire(&area->status);
 	if (state) {
-		struct task_struct *p = per_cpu(current_task, cpu);
+		struct task_struct *p = kpac_pages[cpu].task;
 		struct kpac_key *key = &p->kpac_context.key;
 
 		switch (state) {
