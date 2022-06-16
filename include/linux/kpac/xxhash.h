@@ -1,5 +1,5 @@
-#ifndef _LINUX_KPAC_BACKEND_XXHASH_H
-#define _LINUX_KPAC_BACKEND_XXHASH_H
+#ifndef _LINUX_KPAC_XXHASH_H
+#define _LINUX_KPAC_XXHASH_H
 
 #include <linux/kpac_types.h>
 #include <linux/xxhash.h>
@@ -50,4 +50,4 @@ unsigned long kpac_aut(unsigned long cipher, unsigned long tweak,
 	return plain;
 }
 
-#endif /* _LINUX_KPAC_BACKEND_XXHASH_H */
+#endif /* _LINUX_KPAC_XXHASH_H */

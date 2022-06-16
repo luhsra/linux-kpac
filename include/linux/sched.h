@@ -850,8 +850,9 @@ struct task_struct {
 	struct list_head		trc_holdout_list;
 #endif /* #ifdef CONFIG_TASKS_TRACE_RCU */
 
-	/* Software-based pointer authentication: */
+#ifdef CONFIG_KPAC
 	struct kpac_context		kpac_context;
+#endif /* #ifdef CONFIG_KPAC */
 
 	struct sched_info		sched_info;
 

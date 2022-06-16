@@ -65,6 +65,30 @@ config PAGE_TABLE_ISOLATION
 
 	  See Documentation/x86/pti.rst for more details.
 
+menuconfig KPAC
+	bool "Enable software-emulated pointer authentication"
+	depends on (X86_64 || ARM64)
+
+if KPAC
+
+config KPAC_BASE
+	hex "Userspace mapping address"
+	default 0x9AC00000000
+
+choice
+	prompt "Pointer authentication backend"
+	default KPAC_BACKEND_XXHASH
+
+	config KPAC_BACKEND_NOP
+		bool "None (DEBUG)"
+
+	config KPAC_BACKEND_XXHASH
+		bool "xxHash hashing algorithm"
+
+endchoice
+
+endif # KPAC
+
 config SECURITY_INFINIBAND
 	bool "Infiniband Security Hooks"
 	depends on SECURITY && INFINIBAND

@@ -3,13 +3,14 @@
 #include <linux/freezer.h>
 #include <linux/mm.h>
 #include <linux/rmap.h>
+
 #include <linux/kpac.h>
-#include <linux/kpac/backend.h>
+#include <linux/kpac_backend.h>
 
 #include <asm/pgalloc.h>
 
 #define KPAC_CPU	3
-#define KPAC_BASE	0x9AC00000000		/* Occupies it's own pgd. */
+#define KPAC_BASE	CONFIG_KPAC_BASE	/* Occupies it's own pgd. */
 #define KPAC_VM_FLAGS	\
 	(VM_READ|VM_MAYREAD|VM_WRITE|VM_MAYWRITE|VM_PFNMAP|VM_SHARED)
 

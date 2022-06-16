@@ -1,5 +1,6 @@
 #ifndef _LINUX_KPAC_TYPES_H
 #define _LINUX_KPAC_TYPES_H
+#ifdef CONFIG_KPAC
 
 #include <asm/types.h>
 
@@ -31,4 +32,5 @@ struct kpac_context {
 	struct kpac_key key;
 };
 
+#endif /* CONFIG_KPAC */
 #endif /* _LINUX_KPAC_TYPES_H */

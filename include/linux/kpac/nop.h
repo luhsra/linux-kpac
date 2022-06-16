@@ -1,5 +1,5 @@
-#ifndef _LINUX_KPAC_BACKEND_NOP_H
-#define _LINUX_KPAC_BACKEND_NOP_H
+#ifndef _LINUX_KPAC_NOP_H
+#define _LINUX_KPAC_NOP_H
 
 #include <linux/kpac_types.h>
 
@@ -17,4 +17,4 @@ static inline unsigned long kpac_aut(unsigned long cipher, unsigned long tweak,
 	return cipher;
 }
 
-#endif /* _LINUX_KPAC_BACKEND_NOP_H */
+#endif /* _LINUX_KPAC_NOP_H */
