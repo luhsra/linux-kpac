@@ -1,3 +1,6 @@
+#include <linux/debugfs.h>
+#include <linux/percpu-defs.h>
+#include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/kthread.h>
 #include <linux/freezer.h>
@@ -19,85 +22,20 @@ enum kpac_ops {
 	OP_AUT = 2
 };
 
-static struct kobject *kpac_kobj; /* The parent directory hosting the device
-				   * instances */
-static bool kpac_initialized;     /* Forbid access to uninitialized state */
+static struct dentry *kpacd_dir;
 
 struct kpacd {
-	struct kobject		kobj;
+	struct cpumask	cpumask; /* Mask of CPUs this instance is polling */
+
+	unsigned long 	nr_aut;  /* Statistics */
+	unsigned long	nr_pac;
+
 	struct task_struct	*kthread;
-
-	struct cpumask		cpumask; /* Mask of CPUs we are polling */
-
-	struct {
-		unsigned long 	nr_aut;
-		unsigned long	nr_pac;
-	} stat;
-
-	struct list_head	node;
+	struct mutex		lock;	/* Protects kthread and cpumask */
+	unsigned int		cpu;	/* Which CPU does this instance
+					 * belong to? */
 };
-static LIST_HEAD(kpacd_list);
-static DEFINE_MUTEX(kpacd_mutex);
-
-#define to_kpacd(kobj)		container_of(kobj, struct kpacd, kobj)
-
-static ssize_t kpacd_stat_show(struct kobject *kobj, struct kobj_attribute *attr,
-			       char *buf)
-{
-	struct kpacd *kpacd = to_kpacd(kobj);
-	unsigned long var;
-
-	if (!strcmp(attr->attr.name, "nr_pac"))
-		var = READ_ONCE(kpacd->stat.nr_pac);
-	else if (!strcmp(attr->attr.name, "nr_aut"))
-		var = READ_ONCE(kpacd->stat.nr_aut);
-	else
-		BUG();
-
-	return sysfs_emit(buf, "%lu\n", var);
-}
-
-static ssize_t kpacd_stat_store(struct kobject *kobj, struct kobj_attribute *attr,
-				const char *buf, size_t count)
-{
-	struct kpacd *kpacd = to_kpacd(kobj);
-
-	/* FIXME (kpac): racing with kpacd_poll here */
-
-	if (!strcmp(attr->attr.name, "nr_pac"))
-		WRITE_ONCE(kpacd->stat.nr_pac, 0);
-	else if (!strcmp(attr->attr.name, "nr_aut"))
-		WRITE_ONCE(kpacd->stat.nr_aut, 0);
-	else
-		return -ENOENT;
-
-	return count;
-}
-
-/* Expose some statistics through sysfs: */
-static struct kobj_attribute nr_pac_attribute =
-	__ATTR(nr_pac, 0644, kpacd_stat_show, kpacd_stat_store);
-static struct kobj_attribute nr_aut_attribute =
-	__ATTR(nr_aut, 0644, kpacd_stat_show, kpacd_stat_store);
-
-static struct attribute *kpacd_default_attrs[] = {
-	&nr_pac_attribute.attr,
-	&nr_aut_attribute.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(kpacd_default);
-
-static void kpacd_release(struct kobject *kobj)
-{
-	struct kpacd *kpacd = to_kpacd(kobj);
-	kfree(kpacd);
-}
-
-static struct kobj_type kpacd_ktype = {
-	.release	= kpacd_release,
-	.sysfs_ops	= &kobj_sysfs_ops,
-	.default_groups	= kpacd_default_groups
-};
+static DEFINE_PER_CPU_ALIGNED(struct kpacd, kpacds);
 
 static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 			     struct vm_area_struct *vma,
@@ -126,6 +64,7 @@ struct kpac_page {
 	p4d_t			*p4d;
 };
 static struct kpac_page kpac_pages[NR_CPUS] __cacheline_aligned;
+static bool kpac_initialized; /* Forbid access to uninitialized state above */
 
 /**
  * kpac_switch - Restore kpac context on task switch.
@@ -136,7 +75,7 @@ static struct kpac_page kpac_pages[NR_CPUS] __cacheline_aligned;
  */
 void kpac_switch(struct task_struct *next)
 {
-	int cpu = smp_processor_id();
+	unsigned int cpu = smp_processor_id();
 	struct task_struct *prev = current;
 	struct kpac_page *page = &kpac_pages[cpu];
 	struct kpac_area *area = page->area;
@@ -171,7 +110,7 @@ bool vma_is_kpac_mapping(struct vm_area_struct *vma)
  */
 void kpac_populate_pgds(struct mm_struct *mm)
 {
-	int cpu;
+	unsigned int cpu;
 	for_each_present_cpu(cpu) {
 		pgd_t *pgd = pgd_offset_cpu(mm, cpu, KPAC_BASE);
 		p4d_t *p4d = kpac_pages[cpu].p4d;
@@ -213,7 +152,7 @@ out_unlock:
 	return ret;
 }
 
-static inline void kpacd_poll_one(struct kpacd *kpacd, int cpu)
+static inline void kpacd_poll_one(struct kpacd *kpacd, unsigned int cpu)
 {
 	struct kpac_area *area = kpac_pages[cpu].area;
 
@@ -225,14 +164,14 @@ static inline void kpacd_poll_one(struct kpacd *kpacd, int cpu)
 		switch (state) {
 		case OP_PAC:
 			area->cipher = kpac_pac(area->plain, area->tweak, key);
-			kpacd->stat.nr_pac++;
-			/* trace_printk("#%d: [%lx %lx] -> %lx\n", cpu, */
+			kpacd->nr_pac++;
+			/* trace_printk("#%u: [%lx %lx] -> %lx\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
 			break;
 		case OP_AUT:
 			area->plain = kpac_aut(area->cipher, area->tweak, key);
-			kpacd->stat.nr_aut++;
-			/* trace_printk("#%d: %lx <- [%lx %lx]\n", cpu, */
+			kpacd->nr_aut++;
+			/* trace_printk("#%u: %lx <- [%lx %lx]\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
 			break;
 		}
@@ -245,7 +184,7 @@ static inline void kpacd_poll_one(struct kpacd *kpacd, int cpu)
 
 static inline void kpacd_poll(struct kpacd *kpacd)
 {
-	int cpu;
+	unsigned int cpu;
 
 	preempt_disable();
 	for_each_cpu(cpu, &kpacd->cpumask)
@@ -260,15 +199,9 @@ static inline void kpacd_poll(struct kpacd *kpacd)
 static int kpacd_main(void *__kpacd)
 {
 	struct kpacd *kpacd = (struct kpacd *) __kpacd;
-	if (kthread_should_stop())
-		return 0;
 
 	/* Get the max time-sharing priority */
 	set_user_nice(current, MIN_NICE);
-
-	/* Exclude our CPU from the cpumask */
-	cpumask_copy(&kpacd->cpumask, cpu_online_mask);
-	cpumask_clear_cpu(smp_processor_id(), &kpacd->cpumask);
 
 	while (!kthread_should_stop()) {
 		if (need_resched())
@@ -277,48 +210,44 @@ static int kpacd_main(void *__kpacd)
 		kpacd_poll(kpacd);
 	}
 
-	kobject_put(&kpacd->kobj);
+	return 0;
+}
+
+/*
+ * Start a new kpacd instance.  Caller must hold p->lock.
+ */
+static int start_kpacd(struct kpacd *p)
+{
+	struct task_struct *kthread;
+
+	if (p->kthread)
+		return 0;
+
+	if (cpumask_empty(&p->cpumask)) {
+		pr_err("kpacd/%u: empty cpumask\n", p->cpu);
+		return -EINVAL;
+	}
+
+	kthread = kthread_run_on_cpu(kpacd_main, p, p->cpu, "kpacd/%u");
+	if (IS_ERR(kthread)) {
+		pr_err("kpacd/%u: kthread_run failed: %pe\n", p->cpu, kthread);
+		return PTR_ERR(kthread);
+	}
+
+	p->kthread = kthread;
 
 	return 0;
 }
 
 /*
- * Start a new kpacd instance.
+ * Stop kpacd instance.  Caller must hold p->lock.
  */
-static int start_new_kpacd(void)
+static void stop_kpacd(struct kpacd *p)
 {
-	int ret = 0;
-	struct kpacd *p = kzalloc(sizeof(*p), GFP_KERNEL);
-	if (!p)
-		return -ENOMEM;
-
-	mutex_lock(&kpacd_mutex);
-
-	p->kthread = kthread_create_on_cpu(kpacd_main, p, KPAC_CPU, "kpacd");
-	if (IS_ERR(p->kthread)) {
-		pr_err("kpac: kthread_create(kpacd) failed\n");
-		ret = PTR_ERR(p->kthread);
-		goto out_free;
+	if (p->kthread) {
+		kthread_stop(p->kthread);
+		p->kthread = NULL;
 	}
-
-	ret = kobject_init_and_add(&p->kobj, &kpacd_ktype, kpac_kobj,
-				   "kpacd-%d", task_pid_nr(p->kthread));
-	if (ret)
-		goto out_stop;
-	kobject_uevent(&p->kobj, KOBJ_ADD);
-	wake_up_process(p->kthread);
-
-	list_add(&p->node, &kpacd_list);
-
-	mutex_unlock(&kpacd_mutex);
-	return 0;
-
-out_stop:
-	kthread_stop(p->kthread);
-out_free:
-	kfree(p);
-	mutex_unlock(&kpacd_mutex);
-	return ret;
 }
 
 /*
@@ -401,14 +330,164 @@ static void kpac_free_pgtables(p4d_t *p4d, unsigned long addr)
 	pte_free(NULL, pte);
 }
 
-/*
- * Initialize the infrastructure required by the device instances and user
- * tasks.
- */
-static int __init kpac_init(void)
+static ssize_t kpacd_online_read(struct file *file, char __user *user_buf,
+				 size_t count, loff_t *ppos)
 {
-	int ret = -ENOMEM;
-	int cpu;
+	struct kpacd *kpacd = (struct kpacd *) file->private_data;
+	char buf[2];
+
+	mutex_lock(&kpacd->lock);
+	buf[0] = kpacd->kthread ? '1' : '0';
+	mutex_unlock(&kpacd->lock);
+
+	buf[1] = '\n';
+	return simple_read_from_buffer(user_buf, count, ppos, buf, 2);
+}
+
+static ssize_t kpacd_online_write(struct file *file,
+				   const char __user *user_buf,
+				   size_t count, loff_t *ppos)
+{
+	struct kpacd *kpacd = (struct kpacd *) file->private_data;
+	int err;
+	bool value;
+
+	err = kstrtobool_from_user(user_buf, count, &value);
+	if (err)
+		return err;
+
+	mutex_lock(&kpacd->lock);
+	if (value)
+		err = start_kpacd(kpacd);
+	else
+		stop_kpacd(kpacd);
+	mutex_unlock(&kpacd->lock);
+
+	if (err)
+		return err;
+
+	return count;
+}
+
+static struct file_operations kpacd_online_fops = {
+	.open		= simple_open,
+	.read		= kpacd_online_read,
+	.write		= kpacd_online_write,
+	.llseek		= default_llseek
+};
+
+static int kpacd_cpumask_show(struct seq_file *m, void *v)
+{
+	struct kpacd *kpacd = (struct kpacd *) m->private;
+	struct cpumask cpumask;
+
+	mutex_lock(&kpacd->lock);
+	cpumask_copy(&cpumask, &kpacd->cpumask);
+	mutex_unlock(&kpacd->lock);
+
+	seq_printf(m, "%*pbl\n", cpumask_pr_args(&cpumask));
+
+	return 0;
+}
+
+static ssize_t kpacd_cpumask_write(struct file *file,
+				   const char __user *user_buf,
+				   size_t count, loff_t *ppos)
+{
+	struct seq_file *s = (struct seq_file *) file->private_data;
+	struct kpacd *kpacd = (struct kpacd *) s->private;
+	struct cpumask new_mask;
+	int err = 0;
+
+	err = cpumask_parselist_user(user_buf, count, &new_mask);
+	if (err)
+		return err;
+
+	if (cpumask_test_cpu(kpacd->cpu, &new_mask)) {
+		pr_err("kpacd/%u: cpumask includes hosting cpu\n", kpacd->cpu);
+		return -EINVAL;
+	}
+
+	mutex_lock(&kpacd->lock);
+	stop_kpacd(kpacd);
+
+	cpumask_copy(&kpacd->cpumask, &new_mask);
+
+	err = start_kpacd(kpacd);
+	mutex_unlock(&kpacd->lock);
+
+	if (err)
+		return err;
+
+	return count;
+}
+
+static int kpacd_cpumask_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, kpacd_cpumask_show, inode->i_private);
+}
+
+static struct file_operations kpacd_cpumask_fops = {
+	.open		= kpacd_cpumask_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.write		= kpacd_cpumask_write
+};
+
+/*
+ * Create a file tree in debugfs to manage pointer authentication daemons from
+ * userspace.
+ */
+static int __init kpac_init_debugfs(void)
+{
+	struct dentry *ret;
+	unsigned int cpu;
+
+	kpacd_dir = debugfs_create_dir("kpacd", NULL);
+	if (IS_ERR(kpacd_dir))
+		return PTR_ERR(kpacd_dir);
+
+	for_each_present_cpu(cpu) {
+		struct kpacd *kpacd = per_cpu_ptr(&kpacds, cpu);
+		struct dentry *dir;
+		char buf[16];
+
+		snprintf(buf, sizeof(buf), "%u", cpu);
+		ret = dir = debugfs_create_dir(buf, kpacd_dir);
+		if (IS_ERR(ret))
+			goto out_remove;
+
+		/* Read-only statistics */
+		debugfs_create_ulong("nr_pac", 0444, dir, &kpacd->nr_pac);
+		debugfs_create_ulong("nr_aut", 0444, dir, &kpacd->nr_aut);
+
+		/* Running state */
+		ret = debugfs_create_file("online", 0644, dir, kpacd,
+					  &kpacd_online_fops);
+		if (IS_ERR(ret))
+			goto out_remove;
+
+		/* Mask of the cpus polled */
+		ret = debugfs_create_file("cpumask", 0644, dir, kpacd,
+					  &kpacd_cpumask_fops);
+		if (IS_ERR(ret))
+			goto out_remove;
+	}
+
+	return 0;
+
+out_remove:
+	debugfs_remove(kpacd_dir);
+	return PTR_ERR(ret);
+}
+
+/*
+ * Allocate communication pages and corresponding p4d pgtables.
+ */
+static int __init kpac_init_pages(void)
+{
+	unsigned int cpu;
 
 	for_each_present_cpu(cpu) {
 		struct kpac_area *area;
@@ -420,21 +499,13 @@ static int __init kpac_init(void)
 			goto out_nomem;
 		pfn = PHYS_PFN(__pa(area));
 		p4d = kpac_alloc_pgtables(KPAC_BASE, pfn);
-
 		kpac_pages[cpu].area = area;
 		kpac_pages[cpu].p4d = p4d;
 
-		pr_info("kpac: allocated %lx for CPU%d\n", pfn, cpu);
+		pr_info("kpac: allocated %lx for CPU%u\n", pfn, cpu);
 	}
 
-	kpac_kobj = kobject_create_and_add("kpac", kernel_kobj);
-	if (IS_ERR(kpac_kobj)) {
-		ret = PTR_ERR(kpac_kobj);
-		goto out_nomem;
-	}
-
-	smp_store_release(&kpac_initialized, true);
-	return start_new_kpacd();
+	return 0;
 
 out_nomem:
 	for_each_present_cpu(cpu) {
@@ -445,6 +516,49 @@ out_nomem:
 			free_page((unsigned long) page->area);
 	}
 
+	return -ENOMEM;
+}
+
+/*
+ * Initialize context for per-CPU instances.
+ */
+static int __init kpac_init_kpacds(void)
+{
+	unsigned int cpu;
+
+	for_each_present_cpu(cpu) {
+		struct kpacd *kpacd = per_cpu_ptr(&kpacds, cpu);
+		kpacd->cpu = cpu;
+		mutex_init(&kpacd->lock);
+	}
+
+	return 0;
+}
+
+/*
+ * Initialize the infrastructure required by the device instances and user
+ * tasks.
+ */
+static int __init kpac_init(void)
+{
+	int ret;
+
+	ret = kpac_init_pages();
+	if (ret)
+		goto fail;
+
+	ret = kpac_init_kpacds();
+	if (ret)
+		goto fail;
+
+	ret = kpac_init_debugfs();
+	if (ret)
+		WARN_ON(1);
+
+	smp_store_release(&kpac_initialized, true);
+	return 0;
+
+fail:
 	pr_err("kpac: initialization failed\n");
 
 	return ret;
