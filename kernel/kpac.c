@@ -220,13 +220,8 @@ static int start_kpacd(struct kpacd *p)
 {
 	struct task_struct *kthread;
 
-	if (p->kthread)
+	if (p->kthread || cpumask_empty(&p->cpumask))
 		return 0;
-
-	if (cpumask_empty(&p->cpumask)) {
-		pr_err("kpacd/%u: empty cpumask\n", p->cpu);
-		return -EINVAL;
-	}
 
 	kthread = kthread_run_on_cpu(kpacd_main, p, p->cpu, "kpacd/%u");
 	if (IS_ERR(kthread)) {
@@ -330,52 +325,6 @@ static void kpac_free_pgtables(p4d_t *p4d, unsigned long addr)
 	pte_free(NULL, pte);
 }
 
-static ssize_t kpacd_online_read(struct file *file, char __user *user_buf,
-				 size_t count, loff_t *ppos)
-{
-	struct kpacd *kpacd = (struct kpacd *) file->private_data;
-	char buf[2];
-
-	mutex_lock(&kpacd->lock);
-	buf[0] = kpacd->kthread ? '1' : '0';
-	mutex_unlock(&kpacd->lock);
-
-	buf[1] = '\n';
-	return simple_read_from_buffer(user_buf, count, ppos, buf, 2);
-}
-
-static ssize_t kpacd_online_write(struct file *file,
-				   const char __user *user_buf,
-				   size_t count, loff_t *ppos)
-{
-	struct kpacd *kpacd = (struct kpacd *) file->private_data;
-	int err;
-	bool value;
-
-	err = kstrtobool_from_user(user_buf, count, &value);
-	if (err)
-		return err;
-
-	mutex_lock(&kpacd->lock);
-	if (value)
-		err = start_kpacd(kpacd);
-	else
-		stop_kpacd(kpacd);
-	mutex_unlock(&kpacd->lock);
-
-	if (err)
-		return err;
-
-	return count;
-}
-
-static struct file_operations kpacd_online_fops = {
-	.open		= simple_open,
-	.read		= kpacd_online_read,
-	.write		= kpacd_online_write,
-	.llseek		= default_llseek
-};
-
 static int kpacd_cpumask_show(struct seq_file *m, void *v)
 {
 	struct kpacd *kpacd = (struct kpacd *) m->private;
@@ -461,12 +410,6 @@ static int __init kpac_init_debugfs(void)
 		/* Read-only statistics */
 		debugfs_create_ulong("nr_pac", 0444, dir, &kpacd->nr_pac);
 		debugfs_create_ulong("nr_aut", 0444, dir, &kpacd->nr_aut);
-
-		/* Running state */
-		ret = debugfs_create_file("online", 0644, dir, kpacd,
-					  &kpacd_online_fops);
-		if (IS_ERR(ret))
-			goto out_remove;
 
 		/* Mask of the cpus polled */
 		ret = debugfs_create_file("cpumask", 0644, dir, kpacd,
