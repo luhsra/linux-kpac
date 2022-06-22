@@ -8,6 +8,7 @@
 
 bool vma_is_kpac_mapping(struct vm_area_struct *vma);
 void kpac_populate_pgds(struct mm_struct *mm);
+void kpac_finish(void);
 void kpac_switch(struct task_struct *p);
 int kpac_exec(void);
 
@@ -21,6 +22,11 @@ static inline bool vma_is_kpac_mapping(struct vm_area_struct *vma)
 static inline void kpac_populate_pgds(struct mm_struct *mm)
 {
 	BUG();
+}
+
+static inline void kpac_finish(void)
+{
+	return;
 }
 
 static inline void kpac_switch(struct task_struct *p)

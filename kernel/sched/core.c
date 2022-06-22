@@ -6197,6 +6197,8 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 
 	schedule_debug(prev, !!sched_mode);
 
+	kpac_finish();
+
 	if (sched_feat(HRTICK) || sched_feat(HRTICK_DL))
 		hrtick_clear(rq);
 

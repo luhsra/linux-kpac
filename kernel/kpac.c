@@ -6,6 +6,7 @@
 #include <linux/freezer.h>
 #include <linux/mm.h>
 #include <linux/rmap.h>
+#include <linux/spinlock.h>
 
 #include <linux/kpac.h>
 #include <linux/kpac_backend.h>
@@ -24,6 +25,9 @@ enum kpac_ops {
 
 static struct dentry *kpacd_dir;
 
+static struct cpumask kpac_online_cpus;   /* Mask of currently polled cpus */
+static DEFINE_SPINLOCK(kpac_online_lock); /* Protects kpac_online_cpus */
+
 struct kpacd {
 	struct cpumask	cpumask; /* Mask of CPUs this instance is polling */
 
@@ -31,11 +35,12 @@ struct kpacd {
 	unsigned long	nr_pac;
 
 	struct task_struct	*kthread;
-	struct mutex		lock;	/* Protects kthread and cpumask */
 	unsigned int		cpu;	/* Which CPU does this instance
 					 * belong to? */
 };
 static DEFINE_PER_CPU_ALIGNED(struct kpacd, kpacds);
+static DEFINE_MUTEX(kpacd_lock); /* Protects kthread and cpumasks fields of
+				  * kpacds */
 
 static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 			     struct vm_area_struct *vma,
@@ -67,6 +72,38 @@ static struct kpac_page kpac_pages[NR_CPUS] __cacheline_aligned;
 static bool kpac_initialized; /* Forbid access to uninitialized state above */
 
 /**
+ * kpac_finish - Try to resolve unfinished pointer authentication in @current
+ */
+void kpac_finish(void)
+{
+	unsigned int cpu;
+	struct kpac_page *page;
+	struct kpac_area *area;
+
+	if (!current->mm || unlikely(!kpac_initialized))
+		return;
+
+	cpu = get_cpu();
+	page = &kpac_pages[cpu];
+	area = page->area;
+
+	/*
+	 * Let the kpacd finish authentication, but only if the thread is
+	 * active, i.e. our cpu is in the mask of polled cpus.
+	 */
+	if (smp_load_acquire(&area->status)) {
+		spin_lock_nested(&kpac_online_lock, SINGLE_DEPTH_NESTING);
+		if (cpumask_test_cpu(cpu, &kpac_online_cpus)) {
+			while (smp_load_acquire(&area->status))
+				cpu_relax();
+		}
+		spin_unlock(&kpac_online_lock);
+	}
+
+	put_cpu();
+}
+
+/**
  * kpac_switch - Restore kpac context on task switch.
  * @next: Task being scheduled next.
  *
@@ -83,20 +120,18 @@ void kpac_switch(struct task_struct *next)
 	if (unlikely(!kpac_initialized))
 		return;
 
-	/* Let the kpacd thread finish authentication. */
-	while (smp_load_acquire(&area->status))
-		cpu_relax();
-
 	if (prev->mm) {
 		struct kpac_area *dst = &prev->kpac_context.area;
 		memcpy(dst, area, sizeof(*dst));
 	}
+
+	page->task = next;
+	wmb();
+
 	if (next->mm) {
 		struct kpac_area *src = &next->kpac_context.area;
 		memcpy(area, src, sizeof(*src));
 	}
-
-	page->task = next;
 }
 
 bool vma_is_kpac_mapping(struct vm_area_struct *vma)
@@ -152,7 +187,7 @@ out_unlock:
 	return ret;
 }
 
-static inline void kpacd_poll_one(struct kpacd *kpacd, unsigned int cpu)
+static inline void kpacd_poll_one(unsigned int cpu)
 {
 	struct kpac_area *area = kpac_pages[cpu].area;
 
@@ -164,13 +199,13 @@ static inline void kpacd_poll_one(struct kpacd *kpacd, unsigned int cpu)
 		switch (state) {
 		case OP_PAC:
 			area->cipher = kpac_pac(area->plain, area->tweak, key);
-			kpacd->nr_pac++;
+			this_cpu_inc(kpacds.nr_pac);
 			/* trace_printk("#%u: [%lx %lx] -> %lx\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
 			break;
 		case OP_AUT:
 			area->plain = kpac_aut(area->cipher, area->tweak, key);
-			kpacd->nr_aut++;
+			this_cpu_inc(kpacds.nr_aut);
 			/* trace_printk("#%u: %lx <- [%lx %lx]\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
 			break;
@@ -182,34 +217,70 @@ static inline void kpacd_poll_one(struct kpacd *kpacd, unsigned int cpu)
 	cpu_relax();
 }
 
-static inline void kpacd_poll(struct kpacd *kpacd)
+static inline void kpacd_poll(void)
 {
 	unsigned int cpu;
 
 	preempt_disable();
-	for_each_cpu(cpu, &kpacd->cpumask)
-		kpacd_poll_one(kpacd, cpu);
+	for_each_cpu(cpu, this_cpu_ptr(&kpacds.cpumask))
+		kpacd_poll_one(cpu);
 
 	preempt_enable_no_resched();
 }
 
 /*
- * The entry point of kpacd
+ * Try to bring down the kpacd thread.  On success removes cpus polled by this
+ * thread from online mask.  Will fail if there's a chance a CPU is waiting on
+ * us in kpac_finish.
  */
-static int kpacd_main(void *__kpacd)
+static inline int kpacd_try_leave(void)
 {
-	struct kpacd *kpacd = (struct kpacd *) __kpacd;
+	int ret = spin_trylock(&kpac_online_lock);
+	if (ret) {
+		cpumask_andnot(&kpac_online_cpus,
+			       &kpac_online_cpus, this_cpu_ptr(&kpacds.cpumask));
+		spin_unlock(&kpac_online_lock);
+	}
 
+	/* If we had no luck with trylock, try again after polling. */
+	return ret;
+}
+
+/*
+ * Mark the CPUs polled by this kpacd thread as online.
+ */
+static inline void kpacd_enter(void)
+{
+	spin_lock(&kpac_online_lock);
+	cpumask_or(&kpac_online_cpus,
+		   &kpac_online_cpus, this_cpu_ptr(&kpacds.cpumask));
+	spin_unlock(&kpac_online_lock);
+}
+
+/*
+ * The entry point of kpacd.
+ */
+static int kpacd_main(void *none)
+{
 	/* Get the max time-sharing priority */
 	set_user_nice(current, MIN_NICE);
 
-	while (!kthread_should_stop()) {
-		if (need_resched())
-			cond_resched();
+	kpacd_enter();
+	for (;;) {
+		if (need_resched() || kthread_should_stop()) {
+			if (kpacd_try_leave()) {
+				if (kthread_should_stop())
+					goto out;
+				cond_resched();
 
-		kpacd_poll(kpacd);
+				kpacd_enter();
+			}
+		}
+
+		kpacd_poll();
 	}
 
+out:
 	return 0;
 }
 
@@ -223,7 +294,7 @@ static int start_kpacd(struct kpacd *p)
 	if (p->kthread || cpumask_empty(&p->cpumask))
 		return 0;
 
-	kthread = kthread_run_on_cpu(kpacd_main, p, p->cpu, "kpacd/%u");
+	kthread = kthread_run_on_cpu(kpacd_main, NULL, p->cpu, "kpacd/%u");
 	if (IS_ERR(kthread)) {
 		pr_err("kpacd/%u: kthread_run failed: %pe\n", p->cpu, kthread);
 		return PTR_ERR(kthread);
@@ -330,11 +401,35 @@ static int kpacd_cpumask_show(struct seq_file *m, void *v)
 	struct kpacd *kpacd = (struct kpacd *) m->private;
 	struct cpumask cpumask;
 
-	mutex_lock(&kpacd->lock);
+	mutex_lock(&kpacd_lock);
 	cpumask_copy(&cpumask, &kpacd->cpumask);
-	mutex_unlock(&kpacd->lock);
+	mutex_unlock(&kpacd_lock);
 
 	seq_printf(m, "%*pbl\n", cpumask_pr_args(&cpumask));
+
+	return 0;
+}
+
+static int kpacd_validate_cpumask(struct kpacd *kpacd, struct cpumask *mask)
+{
+	unsigned int cpu;
+
+	if (cpumask_test_cpu(kpacd->cpu, mask)) {
+		pr_err("kpacd/%u: cpumask includes the hosting cpu\n",
+		       kpacd->cpu);
+		return -EINVAL;
+	}
+
+	for_each_present_cpu(cpu) {
+		struct kpacd *kpacd_cursor = per_cpu_ptr(&kpacds, cpu);
+		if (kpacd_cursor != kpacd &&
+		    cpumask_intersects(&kpacd_cursor->cpumask, mask)) {
+			pr_err("kpacd/%u: cpumask intersects with kpacd/%u\n",
+			       kpacd->cpu, cpu);
+
+			return -EINVAL;
+		}
+	}
 
 	return 0;
 }
@@ -345,25 +440,29 @@ static ssize_t kpacd_cpumask_write(struct file *file,
 {
 	struct seq_file *s = (struct seq_file *) file->private_data;
 	struct kpacd *kpacd = (struct kpacd *) s->private;
-	struct cpumask new_mask;
+	struct cpumask mask;
 	int err = 0;
 
-	err = cpumask_parselist_user(user_buf, count, &new_mask);
+	err = cpumask_parselist_user(user_buf, count, &mask);
 	if (err)
 		return err;
 
-	if (cpumask_test_cpu(kpacd->cpu, &new_mask)) {
-		pr_err("kpacd/%u: cpumask includes hosting cpu\n", kpacd->cpu);
-		return -EINVAL;
-	}
-
-	mutex_lock(&kpacd->lock);
+	mutex_lock(&kpacd_lock);
 	stop_kpacd(kpacd);
 
-	cpumask_copy(&kpacd->cpumask, &new_mask);
+	err = kpacd_validate_cpumask(kpacd, &mask);
+	if (err) {
+		/* We don't restart, so clean cpumask */
+		cpumask_clear(&kpacd->cpumask);
+
+		goto out_unlock;
+	}
+
+	cpumask_copy(&kpacd->cpumask, &mask);
 
 	err = start_kpacd(kpacd);
-	mutex_unlock(&kpacd->lock);
+out_unlock:
+	mutex_unlock(&kpacd_lock);
 
 	if (err)
 		return err;
@@ -468,12 +567,8 @@ out_nomem:
 static int __init kpac_init_kpacds(void)
 {
 	unsigned int cpu;
-
-	for_each_present_cpu(cpu) {
-		struct kpacd *kpacd = per_cpu_ptr(&kpacds, cpu);
-		kpacd->cpu = cpu;
-		mutex_init(&kpacd->lock);
-	}
+	for_each_present_cpu(cpu)
+		per_cpu(kpacds.cpu, cpu) = cpu;
 
 	return 0;
 }
