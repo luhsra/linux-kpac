@@ -13,8 +13,7 @@
 
 #include <asm/pgalloc.h>
 
-#define KPAC_CPU	3
-#define KPAC_BASE	CONFIG_KPAC_BASE	/* Occupies it's own pgd. */
+#define KPAC_BASE	CONFIG_KPAC_BASE
 #define KPAC_VM_FLAGS	\
 	(VM_READ|VM_MAYREAD|VM_WRITE|VM_MAYWRITE|VM_PFNMAP|VM_SHARED)
 
@@ -23,7 +22,7 @@ enum kpac_ops {
 	OP_AUT = 2
 };
 
-static struct dentry *kpacd_dir;
+static struct dentry *kpacd_dir; /* debugfs root */
 
 static struct cpumask kpac_online_cpus;   /* Mask of currently polled cpus */
 static DEFINE_SPINLOCK(kpac_online_lock); /* Protects kpac_online_cpus */
@@ -39,15 +38,15 @@ struct kpacd {
 					 * belong to? */
 };
 static DEFINE_PER_CPU_ALIGNED(struct kpacd, kpacds);
-static DEFINE_MUTEX(kpacd_lock); /* Protects kthread and cpumasks fields of
-				  * kpacds */
+static DEFINE_MUTEX(kpacd_lock); /* Protects kthreads and cpumasks of kpacds */
 
 static vm_fault_t kpac_fault(const struct vm_special_mapping *sm,
 			     struct vm_area_struct *vma,
 			     struct vm_fault *vmf)
 {
-	/* A page fault should not happen for the kpac page.  If it does, kill
-	 * the task and report the problem. */
+	/*
+	 * A page fault should not happen for the kpac page.
+	 */
 	WARN_ON_ONCE(1);
 	return VM_FAULT_SIGSEGV;
 }
@@ -57,22 +56,19 @@ static const struct vm_special_mapping kpac_sm = {
 	.fault = kpac_fault,
 };
 
-/* Per-CPU pages for communication with userspace tasks. */
+/*
+ * Per-CPU pages for communication with userspace tasks.
+ */
 struct kpac_page {
-	/* Contents mapped in kernel: */
-	struct kpac_area	*area ____cacheline_aligned;
+	struct kpac_area	*area; /* Contents mapped in kernel */
+	p4d_t			*p4d;  /* P4Ds for insertion in user pgds */
+} ____cacheline_aligned;
 
-	/* Task currently associated with this page: */
-	struct task_struct	*task;
-
-	/* P4Ds for insertion in userspace pgds: */
-	p4d_t			*p4d;
-};
-static struct kpac_page kpac_pages[NR_CPUS] __cacheline_aligned;
-static bool kpac_initialized; /* Forbid access to uninitialized state above */
+static struct kpac_page kpac_pages[NR_CPUS] __ro_after_init;
+static struct task_struct *kpac_task[NR_CPUS] __cacheline_aligned;
 
 /**
- * kpac_finish - Try to resolve unfinished pointer authentication in @current
+ * kpac_finish - Try to wait on a pending pointer authentication.
  */
 void kpac_finish(void)
 {
@@ -80,7 +76,7 @@ void kpac_finish(void)
 	struct kpac_page *page;
 	struct kpac_area *area;
 
-	if (!current->mm || unlikely(!kpac_initialized))
+	if (!current->mm)
 		return;
 
 	cpu = get_cpu();
@@ -90,13 +86,13 @@ void kpac_finish(void)
 	/*
 	 * Let the kpacd finish authentication, but only if the thread is
 	 * active, i.e. our cpu is in the mask of polled cpus.
+	 *
+	 * As long as kpac_online_lock is taken, threads cannot leave.
 	 */
-	if (smp_load_acquire(&area->status)) {
+	if (READ_ONCE(area->status)) {
 		spin_lock_nested(&kpac_online_lock, SINGLE_DEPTH_NESTING);
-		if (cpumask_test_cpu(cpu, &kpac_online_cpus)) {
-			while (smp_load_acquire(&area->status))
-				cpu_relax();
-		}
+		if (cpumask_test_cpu(cpu, &kpac_online_cpus))
+			smp_cond_load_relaxed(&area->status, !VAL);
 		spin_unlock(&kpac_online_lock);
 	}
 
@@ -117,19 +113,20 @@ void kpac_switch(struct task_struct *next)
 	struct kpac_page *page = &kpac_pages[cpu];
 	struct kpac_area *area = page->area;
 
-	if (unlikely(!kpac_initialized))
-		return;
-
 	if (prev->mm) {
 		struct kpac_area *dst = &prev->kpac_context.area;
 		memcpy(dst, area, sizeof(*dst));
 	}
 
-	page->task = next;
-	wmb();
-
 	if (next->mm) {
 		struct kpac_area *src = &next->kpac_context.area;
+		WRITE_ONCE(kpac_task[cpu], next);
+
+		/*
+		 * Next context might have an unfinished request, make sure
+		 * kpacd sees the right task.
+		 */
+		smp_wmb();
 		memcpy(area, src, sizeof(*src));
 	}
 }
@@ -162,13 +159,10 @@ int kpac_exec(void)
 	struct vm_area_struct *vma;
 	int ret = 0;
 
-	if (unlikely(!kpac_initialized))
-		return 0;
-
 	mmap_write_lock(mm);
 	/*
 	 * Reserve the whole PGD range to avoid conflicts with other mappings
-	 * and complain loudly in case someone insists on using this area.
+	 * and fail everyone who insists on using it.
 	 */
 	vma = _install_special_mapping(mm, KPAC_BASE & PGDIR_MASK, PGDIR_SIZE,
 				       KPAC_VM_FLAGS, &kpac_sm);
@@ -193,7 +187,7 @@ static inline void kpacd_poll_one(unsigned int cpu)
 
 	unsigned long state = smp_load_acquire(&area->status);
 	if (state) {
-		struct task_struct *p = kpac_pages[cpu].task;
+		struct task_struct *p = READ_ONCE(kpac_task[cpu]);
 		struct kpac_key *key = &p->kpac_context.key;
 
 		switch (state) {
@@ -220,18 +214,13 @@ static inline void kpacd_poll_one(unsigned int cpu)
 static inline void kpacd_poll(void)
 {
 	unsigned int cpu;
-
-	preempt_disable();
 	for_each_cpu(cpu, this_cpu_ptr(&kpacds.cpumask))
 		kpacd_poll_one(cpu);
-
-	preempt_enable_no_resched();
 }
 
 /*
- * Try to bring down the kpacd thread.  On success removes cpus polled by this
- * thread from online mask.  Will fail if there's a chance a CPU is waiting on
- * us in kpac_finish.
+ * Try to stop the kpacd thread, failing if there's a waiter in kpac_finish().
+ * On success removes cpus polled by this thread from online mask.
  */
 static inline int kpacd_try_leave(void)
 {
@@ -240,6 +229,7 @@ static inline int kpacd_try_leave(void)
 		cpumask_andnot(&kpac_online_cpus,
 			       &kpac_online_cpus, this_cpu_ptr(&kpacds.cpumask));
 		spin_unlock(&kpac_online_lock);
+		preempt_enable_no_resched();
 	}
 
 	/* If we had no luck with trylock, try again after polling. */
@@ -251,6 +241,7 @@ static inline int kpacd_try_leave(void)
  */
 static inline void kpacd_enter(void)
 {
+	preempt_disable();
 	spin_lock(&kpac_online_lock);
 	cpumask_or(&kpac_online_cpus,
 		   &kpac_online_cpus, this_cpu_ptr(&kpacds.cpumask));
@@ -593,7 +584,6 @@ static int __init kpac_init(void)
 	if (ret)
 		WARN_ON(1);
 
-	smp_store_release(&kpac_initialized, true);
 	return 0;
 
 fail:
