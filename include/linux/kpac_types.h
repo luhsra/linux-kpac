@@ -15,6 +15,7 @@ struct kpac_key {
 	 */
 	union {
 		struct kpac_key_u128 xxhash;
+		struct kpac_key_u128 qarma;
 	};
 };
 

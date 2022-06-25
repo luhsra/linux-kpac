@@ -5,6 +5,8 @@
 #include <linux/kpac/nop.h>
 #elif defined(CONFIG_KPAC_BACKEND_XXHASH)
 #include <linux/kpac/xxhash.h>
+#elif defined(CONFIG_KPAC_BACKEND_QARMA)
+#include <linux/kpac/qarma.h>
 #else
 #error "No pointer authentication backend selected"
 #endif

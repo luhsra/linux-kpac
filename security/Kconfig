@@ -85,6 +85,9 @@ choice
 	config KPAC_BACKEND_XXHASH
 		bool "xxHash hashing algorithm"
 
+	config KPAC_BACKEND_QARMA
+		bool "ARMv8.3 QARMA block cipher"
+
 endchoice
 
 endif # KPAC
