@@ -67,8 +67,36 @@ struct kpac_page {
 static struct kpac_page kpac_pages[NR_CPUS] __ro_after_init;
 static struct task_struct *kpac_task[NR_CPUS] __cacheline_aligned;
 
+static inline void kpacd_poll_one(unsigned int cpu)
+{
+	struct kpac_area *area = kpac_pages[cpu].area;
+
+	unsigned long state = smp_load_acquire(&area->status);
+	if (state) {
+		struct task_struct *p = kpac_task[cpu];
+		struct kpac_key *key = &p->kpac_context.key;
+
+		switch (state) {
+		case OP_PAC:
+			area->cipher = kpac_pac(area->plain, area->tweak, key);
+			this_cpu_inc(kpacds.nr_pac);
+			/* trace_printk("#%u: [%lx %lx] -> %lx\n", cpu, */
+			/* 	     area->plain, area->tweak, area->cipher); */
+			break;
+		case OP_AUT:
+			area->plain = kpac_aut(area->cipher, area->tweak, key);
+			this_cpu_inc(kpacds.nr_aut);
+			/* trace_printk("#%u: %lx <- [%lx %lx]\n", cpu, */
+			/* 	     area->plain, area->tweak, area->cipher); */
+			break;
+		}
+
+		smp_store_release(&area->status, 0);
+	}
+}
+
 /**
- * kpac_finish - Try to wait on a pending pointer authentication.
+ * kpac_finish - Finish a pending pointer authentication request in @current.
  */
 void kpac_finish(void)
 {
@@ -84,15 +112,20 @@ void kpac_finish(void)
 	area = page->area;
 
 	/*
-	 * Let the kpacd finish authentication, but only if the thread is
-	 * active, i.e. our cpu is in the mask of polled cpus.
+	 * As long as kpac_online_lock is taken, threads cannot leave or return
+	 * (see kpacd_enter() and kpacd_try_leave()).
 	 *
-	 * As long as kpac_online_lock is taken, threads cannot leave.
+	 * Let kpacd finish if it is active, i.e. the cpu is in the mask of
+	 * polled cpus; otherwise, we complete the request ourselves.
 	 */
 	if (READ_ONCE(area->status)) {
 		spin_lock_nested(&kpac_online_lock, SINGLE_DEPTH_NESTING);
+
 		if (cpumask_test_cpu(cpu, &kpac_online_cpus))
 			smp_cond_load_relaxed(&area->status, !VAL);
+		else
+			kpacd_poll_one(cpu);
+
 		spin_unlock(&kpac_online_lock);
 	}
 
@@ -104,7 +137,7 @@ void kpac_finish(void)
  * @next: Task being scheduled next.
  *
  * Store internal state of the device of @current task into the TCB and restore
- * saved context for the @next task.
+ * saved context for the @next task.  Caller must hold the runqueue lock.
  */
 void kpac_switch(struct task_struct *next)
 {
@@ -114,20 +147,13 @@ void kpac_switch(struct task_struct *next)
 	struct kpac_area *area = page->area;
 
 	if (prev->mm) {
-		struct kpac_area *dst = &prev->kpac_context.area;
-		memcpy(dst, area, sizeof(*dst));
+		memcpy(&prev->kpac_context.area, area, sizeof(*area));
+		WARN_ON(prev->kpac_context.area.status);
 	}
 
 	if (next->mm) {
-		struct kpac_area *src = &next->kpac_context.area;
-		WRITE_ONCE(kpac_task[cpu], next);
-
-		/*
-		 * Next context might have an unfinished request, make sure
-		 * kpacd sees the right task.
-		 */
-		smp_wmb();
-		memcpy(area, src, sizeof(*src));
+		memcpy(area, &next->kpac_context.area, sizeof(*area));
+		kpac_task[cpu] = next;
 	}
 }
 
@@ -181,43 +207,6 @@ out_unlock:
 	return ret;
 }
 
-static inline void kpacd_poll_one(unsigned int cpu)
-{
-	struct kpac_area *area = kpac_pages[cpu].area;
-
-	unsigned long state = smp_load_acquire(&area->status);
-	if (state) {
-		struct task_struct *p = READ_ONCE(kpac_task[cpu]);
-		struct kpac_key *key = &p->kpac_context.key;
-
-		switch (state) {
-		case OP_PAC:
-			area->cipher = kpac_pac(area->plain, area->tweak, key);
-			this_cpu_inc(kpacds.nr_pac);
-			/* trace_printk("#%u: [%lx %lx] -> %lx\n", cpu, */
-			/* 	     area->plain, area->tweak, area->cipher); */
-			break;
-		case OP_AUT:
-			area->plain = kpac_aut(area->cipher, area->tweak, key);
-			this_cpu_inc(kpacds.nr_aut);
-			/* trace_printk("#%u: %lx <- [%lx %lx]\n", cpu, */
-			/* 	     area->plain, area->tweak, area->cipher); */
-			break;
-		}
-
-		smp_store_release(&area->status, 0);
-	}
-
-	cpu_relax();
-}
-
-static inline void kpacd_poll(void)
-{
-	unsigned int cpu;
-	for_each_cpu(cpu, this_cpu_ptr(&kpacds.cpumask))
-		kpacd_poll_one(cpu);
-}
-
 /*
  * Try to stop the kpacd thread, failing if there's a waiter in kpac_finish().
  * On success removes cpus polled by this thread from online mask.
@@ -253,6 +242,8 @@ static inline void kpacd_enter(void)
  */
 static int kpacd_main(void *none)
 {
+	unsigned int cpu;
+
 	/* Get the max time-sharing priority */
 	set_user_nice(current, MIN_NICE);
 
@@ -268,7 +259,10 @@ static int kpacd_main(void *none)
 			}
 		}
 
-		kpacd_poll();
+		for_each_cpu(cpu, this_cpu_ptr(&kpacds.cpumask))
+			kpacd_poll_one(cpu);
+
+		cpu_relax();
 	}
 
 out:
