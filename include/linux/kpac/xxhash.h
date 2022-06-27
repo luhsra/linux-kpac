@@ -9,6 +9,8 @@
 #define __KPAC_VA_MASK		((1ULL << VA_BITS) - 1)
 #define __KPAC_XXHASH_SEED 	1
 
+static const char *const kpac_backend_name = "xxhash";
+
 static inline
 unsigned long __kpac_compute_pac(unsigned long plain, unsigned long tweak,
 				 struct kpac_key *_key)

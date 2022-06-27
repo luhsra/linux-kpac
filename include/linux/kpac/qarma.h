@@ -18,6 +18,8 @@
 #define MAKE_64BIT_MASK(shift, length) \
 	(((~0ULL) >> (64 - (length))) << (shift))
 
+static const char *const kpac_backend_name = "qarma";
+
 static inline u64 extract64(u64 value, int start, int length)
 {
 	return (value >> start) & (~0ULL >> (64 - length));

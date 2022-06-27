@@ -468,6 +468,20 @@ static struct file_operations kpacd_cpumask_fops = {
 	.write		= kpacd_cpumask_write
 };
 
+static int per_cpu_ulong_get(void *data, u64 *val)
+{
+	unsigned long acc = 0;
+	unsigned int cpu;
+
+	for_each_present_cpu(cpu)
+		acc += *per_cpu_ptr((unsigned long *) data, cpu);
+
+	*val = acc;
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(per_cpu_ulong_fops, per_cpu_ulong_get, NULL, "%llu\n");
+
 /*
  * Create a file tree in debugfs to manage pointer authentication daemons from
  * userspace.
@@ -491,16 +505,20 @@ static int __init kpac_init_debugfs(void)
 		if (IS_ERR(ret))
 			goto out_remove;
 
-		/* Read-only statistics */
-		debugfs_create_ulong("nr_pac", 0444, dir, &kpacd->nr_pac);
-		debugfs_create_ulong("nr_aut", 0444, dir, &kpacd->nr_aut);
-
 		/* Mask of the cpus polled */
 		ret = debugfs_create_file("cpumask", 0644, dir, kpacd,
 					  &kpacd_cpumask_fops);
 		if (IS_ERR(ret))
 			goto out_remove;
 	}
+
+	/* Read only statistics */
+	debugfs_create_file_unsafe("nr_pac", 0444, kpacd_dir,
+				   &kpacds.nr_pac, &per_cpu_ulong_fops);
+	debugfs_create_file_unsafe("nr_aut", 0444, kpacd_dir,
+				   &kpacds.nr_aut, &per_cpu_ulong_fops);
+	debugfs_create_str("backend", 0444, kpacd_dir,
+			   (char **) &kpac_backend_name);
 
 	return 0;
 
