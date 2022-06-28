@@ -384,14 +384,9 @@ static void kpac_free_pgtables(p4d_t *p4d, unsigned long addr)
 static int kpacd_cpumask_show(struct seq_file *m, void *v)
 {
 	struct kpacd *kpacd = (struct kpacd *) m->private;
-	struct cpumask cpumask;
-
 	mutex_lock(&kpacd_lock);
-	cpumask_copy(&cpumask, &kpacd->cpumask);
+	seq_printf(m, "%*pbl\n", cpumask_pr_args(&kpacd->cpumask));
 	mutex_unlock(&kpacd_lock);
-
-	seq_printf(m, "%*pbl\n", cpumask_pr_args(&cpumask));
-
 	return 0;
 }
 
@@ -428,31 +423,30 @@ static ssize_t kpacd_cpumask_write(struct file *file,
 	struct cpumask mask;
 	int err = 0;
 
-	err = cpumask_parselist_user(user_buf, count, &mask);
-	if (err)
-		return err;
-
 	mutex_lock(&kpacd_lock);
 	stop_kpacd(kpacd);
 
-	err = kpacd_validate_cpumask(kpacd, &mask);
-	if (err) {
-		/* We don't restart, so clean cpumask */
-		cpumask_clear(&kpacd->cpumask);
+	err = cpumask_parselist_user(user_buf, count, &mask);
+	if (err)
+		goto err_unlock;
 
-		goto out_unlock;
-	}
+	err = kpacd_validate_cpumask(kpacd, &mask);
+	if (err)
+		goto err_unlock;
 
 	cpumask_copy(&kpacd->cpumask, &mask);
-
 	err = start_kpacd(kpacd);
-out_unlock:
-	mutex_unlock(&kpacd_lock);
-
 	if (err)
-		return err;
+		goto err_unlock;
 
+	mutex_unlock(&kpacd_lock);
 	return count;
+
+err_unlock:
+	/* Clear the cpumask because the thread did not start */
+	cpumask_clear(&kpacd->cpumask);
+	mutex_unlock(&kpacd_lock);
+	return err;
 }
 
 static int kpacd_cpumask_open(struct inode *inode, struct file *file)
