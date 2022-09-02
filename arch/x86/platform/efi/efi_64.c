@@ -71,6 +71,7 @@ int __init efi_alloc_page_tables(void)
 	p4d_t *p4d;
 	pud_t *pud;
 	gfp_t gfp_mask;
+	unsigned int cpu;
 
 	gfp_mask = GFP_KERNEL | __GFP_ZERO;
 	efi_pgd = (pgd_t *)__get_free_pages(gfp_mask, PGD_ALLOCATION_ORDER);
@@ -87,6 +88,9 @@ int __init efi_alloc_page_tables(void)
 		goto free_p4d;
 
 	efi_mm.pgd = efi_pgd;
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		efi_mm.pcpu_pgds[cpu] = efi_mm.pgd;
+
 	mm_init_cpumask(&efi_mm);
 	init_new_context(NULL, &efi_mm);
 

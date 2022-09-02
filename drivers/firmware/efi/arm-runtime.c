@@ -52,8 +52,12 @@ device_initcall(ptdump_init);
 static bool __init efi_virtmap_init(void)
 {
 	efi_memory_desc_t *md;
+	unsigned int cpu;
 
 	efi_mm.pgd = pgd_alloc(&efi_mm);
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		efi_mm.pcpu_pgds[cpu] = efi_mm.pgd;
+
 	mm_init_cpumask(&efi_mm);
 	init_new_context(NULL, &efi_mm);
 
