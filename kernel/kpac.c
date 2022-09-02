@@ -67,6 +67,8 @@ struct kpac_page {
 static struct kpac_page kpac_pages[NR_CPUS] __ro_after_init;
 static struct task_struct *kpac_task[NR_CPUS] __cacheline_aligned;
 
+static bool kpac_initialized = false;
+
 static inline void kpacd_poll_one(unsigned int cpu)
 {
 	struct kpac_area *area = kpac_pages[cpu].area;
@@ -104,6 +106,8 @@ void kpac_finish(void)
 	struct kpac_page *page;
 	struct kpac_area *area;
 
+	if (unlikely(!kpac_initialized))
+		return;
 	if (!current->mm)
 		return;
 
@@ -146,6 +150,9 @@ void kpac_switch(struct task_struct *next)
 	struct kpac_page *page = &kpac_pages[cpu];
 	struct kpac_area *area = page->area;
 
+	if (unlikely(!kpac_initialized))
+		return;
+
 	if (prev->mm) {
 		memcpy(&prev->kpac_context.area, area, sizeof(*area));
 		WARN_ON(prev->kpac_context.area.status);
@@ -184,6 +191,9 @@ int kpac_exec(void)
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	int ret = 0;
+
+	if (unlikely(!kpac_initialized))
+		return 0;
 
 	mmap_write_lock(mm);
 	/*
@@ -590,6 +600,7 @@ static int __init kpac_init(void)
 	if (ret)
 		WARN_ON(1);
 
+	smp_store_release(&kpac_initialized, true);
 	return 0;
 
 fail:
