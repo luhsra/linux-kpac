@@ -17,7 +17,7 @@
 
 static struct kmem_cache *pgd_cache __ro_after_init;
 
-static pgd_t *_pgd_alloc()
+static pgd_t *_pgd_alloc(void)
 {
 	gfp_t gfp = GFP_PGTABLE_USER;
 
