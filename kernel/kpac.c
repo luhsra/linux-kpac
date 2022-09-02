@@ -531,6 +531,17 @@ out_remove:
 	return PTR_ERR(ret);
 }
 
+static void *get_zeroed_page_cpu(gfp_t gfp_mask, unsigned int cpu)
+{
+	struct page *page;
+
+	gfp_mask |= __GFP_ZERO;
+	gfp_mask &= ~__GFP_HIGHMEM;
+
+	page = __alloc_pages(gfp_mask, 0, cpu_to_node(cpu), NULL);
+	return page_address(page);
+}
+
 /*
  * Allocate communication pages and corresponding p4d pgtables.
  */
@@ -543,7 +554,7 @@ static int __init kpac_init_pages(void)
 		unsigned long pfn;
 		p4d_t *p4d;
 
-		area = (struct kpac_area *) get_zeroed_page(GFP_USER);
+		area = (struct kpac_area *) get_zeroed_page_cpu(GFP_USER, cpu);
 		if (!area)
 			goto out_nomem;
 		pfn = PHYS_PFN(__pa(area));
