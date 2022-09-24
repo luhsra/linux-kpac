@@ -1,18 +1,43 @@
-Linux kernel
-============
+Linux kernel with kpac extensions
+=================================
 
-There are several guides for kernel developers and users. These guides can
-be rendered in a number of formats, like HTML and PDF. Please read
-Documentation/admin-guide/README.rst first.
+This repository contains the source code of the Linux kernel with kpac
+extensions described in "Software-Emulated Pointer Authentication for
+Control-Flow Integrity Protection" [1].
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.  The formatted documentation can also be read online at:
+The core kpac functionality is implemented in kernel/kpac.c.  The various
+hashing backends are implemented as header files in include/linux/kpac/ and are
+included through include/linux/kpac_backend.h.  The types are defined separately
+in include/linux/kpac_types.h.
 
-    https://www.kernel.org/doc/html/latest/
+The Kconfig database is extended with following configuration options:
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the Restructured Text markup notation.
++- Security options
+   +- Enable software-emulated pointer authentication       [bool]
+      +- Userspace mapping address                          [hex]
+      +- Pointer authentication backend                     [choice]
+         +- None (DEBUG)
+         +- xxHash hashing algorithm
+         +- ARMv8.3 QARMA block cipher
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+The extension is configured at runtime by writing into the debugfs directory
+tree /sys/kernel/debug/kpac/:
+
++- kpac/
+   +- addr               [Virtual address of the kpac page (read-only)]
+   +- backend            [Hashing algorithm (read-only)]
+   +- nr_aut             [Counter of AUT requests (read-only)]
+   +- nr_aut             [Counter of PAC requests (read-only)]
+   +- 0/
+      +- cpumask         [CPUs served by CPU 0]
+   +- 1/
+      +- cpumask         [CPUs served by CPU 1]
+
+   ...
+
+   +- N/
+      +- cpumask         [CPUs served by CPU N]
+
+-----------
+
+[1] https://scm.sra.uni-hannover.de/theses/2022/BA_ill.ostapyshyn
