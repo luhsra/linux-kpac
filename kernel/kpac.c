@@ -23,6 +23,7 @@ enum kpac_ops {
 };
 
 static struct dentry *kpacd_dir; /* debugfs root */
+static unsigned long kpac_base = CONFIG_KPAC_BASE; /* for debugfs */
 
 static struct cpumask kpac_online_cpus;   /* Mask of currently polled cpus */
 static DEFINE_SPINLOCK(kpac_online_lock); /* Protects kpac_online_cpus */
@@ -517,6 +518,7 @@ static int __init kpac_init_debugfs(void)
 	}
 
 	/* Read only statistics */
+	debugfs_create_xul("addr", 0444, kpacd_dir, &kpac_base);
 	debugfs_create_file_unsafe("nr_pac", 0444, kpacd_dir,
 				   &kpacds.nr_pac, &per_cpu_ulong_fops);
 	debugfs_create_file_unsafe("nr_aut", 0444, kpacd_dir,
