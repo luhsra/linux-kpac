@@ -426,19 +426,20 @@ static ssize_t iwl_dbgfs_amsdu_len_write(struct ieee80211_sta *sta,
 		return -EINVAL;
 
 	/* only change from debug set <-> debug unset */
-	if ((amsdu_len && mvmsta->orig_amsdu_len) ||
-	    (!!amsdu_len && mvmsta->orig_amsdu_len))
+	if (amsdu_len && mvmsta->orig_amsdu_len)
 		return -EBUSY;
 
 	if (amsdu_len) {
-		mvmsta->orig_amsdu_len = sta->max_amsdu_len;
-		sta->max_amsdu_len = amsdu_len;
-		for (i = 0; i < ARRAY_SIZE(sta->max_tid_amsdu_len); i++)
-			sta->max_tid_amsdu_len[i] = amsdu_len;
+		mvmsta->orig_amsdu_len = sta->cur->max_amsdu_len;
+		sta->deflink.agg.max_amsdu_len = amsdu_len;
+		sta->deflink.agg.max_amsdu_len = amsdu_len;
+		for (i = 0; i < ARRAY_SIZE(sta->deflink.agg.max_tid_amsdu_len); i++)
+			sta->deflink.agg.max_tid_amsdu_len[i] = amsdu_len;
 	} else {
-		sta->max_amsdu_len = mvmsta->orig_amsdu_len;
+		sta->deflink.agg.max_amsdu_len = mvmsta->orig_amsdu_len;
 		mvmsta->orig_amsdu_len = 0;
 	}
+
 	return count;
 }
 
@@ -452,7 +453,7 @@ static ssize_t iwl_dbgfs_amsdu_len_read(struct file *file,
 	char buf[32];
 	int pos;
 
-	pos = scnprintf(buf, sizeof(buf), "current %d ", sta->max_amsdu_len);
+	pos = scnprintf(buf, sizeof(buf), "current %d ", sta->cur->max_amsdu_len);
 	pos += scnprintf(buf + pos, sizeof(buf) - pos, "stored %d\n",
 			 mvmsta->orig_amsdu_len);
 
@@ -1234,7 +1235,7 @@ static int _iwl_dbgfs_inject_beacon_ie(struct iwl_mvm *mvm, char *bin, int len)
 
 	mvm->hw->extra_beacon_tailroom = len;
 
-	beacon = ieee80211_beacon_get_template(mvm->hw, vif, NULL);
+	beacon = ieee80211_beacon_get_template(mvm->hw, vif, NULL, 0);
 	if (!beacon)
 		goto out_err;
 
@@ -1479,7 +1480,7 @@ iwl_dbgfs_he_sniffer_params_write(struct iwl_mvm *mvm, char *buf,
 		.mvm = mvm,
 	};
 	u16 wait_cmds[] = {
-		iwl_cmd_id(HE_AIR_SNIFFER_CONFIG_CMD, DATA_PATH_GROUP, 0),
+		WIDE_ID(DATA_PATH_GROUP, HE_AIR_SNIFFER_CONFIG_CMD),
 	};
 	u32 aid;
 	int ret;
@@ -1514,8 +1515,9 @@ iwl_dbgfs_he_sniffer_params_write(struct iwl_mvm *mvm, char *buf,
 				   wait_cmds, ARRAY_SIZE(wait_cmds),
 				   iwl_mvm_sniffer_apply, &apply);
 
-	ret = iwl_mvm_send_cmd_pdu(mvm, iwl_cmd_id(HE_AIR_SNIFFER_CONFIG_CMD,
-						   DATA_PATH_GROUP, 0), 0,
+	ret = iwl_mvm_send_cmd_pdu(mvm,
+				   WIDE_ID(DATA_PATH_GROUP, HE_AIR_SNIFFER_CONFIG_CMD),
+				   0,
 				   sizeof(he_mon_cmd), &he_mon_cmd);
 
 	/* no need to really wait, we already did anyway */
@@ -1727,8 +1729,7 @@ static ssize_t iwl_dbgfs_mem_read(struct file *file, char __user *user_buf,
 	if (!iwl_mvm_firmware_running(mvm))
 		return -EIO;
 
-	hcmd.id = iwl_cmd_id(*ppos >> 24 ? UMAC_RD_WR : LMAC_RD_WR,
-			     DEBUG_GROUP, 0);
+	hcmd.id = WIDE_ID(DEBUG_GROUP, *ppos >> 24 ? UMAC_RD_WR : LMAC_RD_WR);
 	cmd.op = cpu_to_le32(DEBUG_MEM_OP_READ);
 
 	/* Take care of alignment of both the position and the length */
@@ -1758,7 +1759,7 @@ static ssize_t iwl_dbgfs_mem_read(struct file *file, char __user *user_buf,
 		goto out;
 	}
 
-	ret = len - copy_to_user(user_buf, (void *)rsp->data + delta, len);
+	ret = len - copy_to_user(user_buf, (u8 *)rsp->data + delta, len);
 	*ppos += ret;
 
 out:
@@ -1782,8 +1783,7 @@ static ssize_t iwl_dbgfs_mem_write(struct file *file,
 	if (!iwl_mvm_firmware_running(mvm))
 		return -EIO;
 
-	hcmd.id = iwl_cmd_id(*ppos >> 24 ? UMAC_RD_WR : LMAC_RD_WR,
-			     DEBUG_GROUP, 0);
+	hcmd.id = WIDE_ID(DEBUG_GROUP, *ppos >> 24 ? UMAC_RD_WR : LMAC_RD_WR);
 
 	if (*ppos & 0x3 || count < 4) {
 		op = DEBUG_MEM_OP_WRITE_BYTES;

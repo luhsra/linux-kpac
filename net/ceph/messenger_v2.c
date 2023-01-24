@@ -862,7 +862,7 @@ static void get_bvec_at(struct ceph_msg_data_cursor *cursor,
 		ceph_msg_data_advance(cursor, 0);
 
 	/* get a piece of data, cursor isn't advanced */
-	page = ceph_msg_data_next(cursor, &off, &len, NULL);
+	page = ceph_msg_data_next(cursor, &off, &len);
 
 	bv->bv_page = page;
 	bv->bv_offset = off;
@@ -1773,10 +1773,8 @@ static int prepare_read_data(struct ceph_connection *con)
 
 		bv.bv_page = con->bounce_page;
 		bv.bv_offset = 0;
-		set_in_bvec(con, &bv);
-	} else {
-		set_in_bvec(con, &bv);
 	}
+	set_in_bvec(con, &bv);
 	con->v2.in_state = IN_S_PREPARE_READ_DATA_CONT;
 	return 0;
 }
@@ -1807,10 +1805,8 @@ static void prepare_read_data_cont(struct ceph_connection *con)
 		if (ceph_test_opt(from_msgr(con->msgr), RXBOUNCE)) {
 			bv.bv_page = con->bounce_page;
 			bv.bv_offset = 0;
-			set_in_bvec(con, &bv);
-		} else {
-			set_in_bvec(con, &bv);
 		}
+		set_in_bvec(con, &bv);
 		WARN_ON(con->v2.in_state != IN_S_PREPARE_READ_DATA_CONT);
 		return;
 	}
