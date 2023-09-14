@@ -1057,6 +1057,10 @@ asmlinkage long sys_set_mempolicy_home_node(unsigned long start, unsigned long l
 					    unsigned long home_node,
 					    unsigned long flags);
 
+/* Software PAC: kernel/kpac.c */
+asmlinkage long sys_kpac_pac(long plain, long tweak);
+asmlinkage long sys_kpac_aut(long cipher, long tweak);
+
 /*
  * Architecture-specific system calls
  */

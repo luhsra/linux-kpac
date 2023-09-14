@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/rmap.h>
 #include <linux/spinlock.h>
+#include <linux/syscalls.h>
 
 #include <linux/kpac.h>
 #include <linux/kpac_backend.h>
@@ -69,6 +70,40 @@ static struct kpac_page kpac_pages[NR_CPUS] __ro_after_init;
 static struct task_struct *kpac_task[NR_CPUS] __cacheline_aligned;
 
 static bool kpac_initialized = false;
+
+unsigned long kpac_pac(unsigned long plain, unsigned long tweak)
+{
+	struct task_struct *p = current;
+	struct kpac_key *key = &p->kpac_context.key;
+
+	long cipher = __kpac_pac(plain, tweak, key);
+	this_cpu_inc(kpacds.nr_pac);
+	/* trace_printk("sc: [%lx %lx] -> %lx\n", plain, tweak, cipher); */
+
+	return cipher;
+}
+
+SYSCALL_DEFINE2(kpac_pac, long, plain, long, tweak)
+{
+	return kpac_pac(plain, tweak);
+}
+
+unsigned long kpac_aut(unsigned long cipher, unsigned long tweak)
+{
+	struct task_struct *p = current;
+	struct kpac_key *key = &p->kpac_context.key;
+
+	long plain = __kpac_aut(cipher, tweak, key);
+	this_cpu_inc(kpacds.nr_aut);
+	/* trace_printk("sc: %lx <- [%lx %lx]\n", plain, tweak, cipher); */
+
+	return plain;
+}
+
+SYSCALL_DEFINE2(kpac_aut, long, cipher, long, tweak)
+{
+	return kpac_aut(cipher, tweak);
+}
 
 static inline void kpacd_poll_one(unsigned int cpu)
 {

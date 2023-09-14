@@ -479,3 +479,6 @@ COND_SYSCALL(setuid16);
 
 /* restartable sequence */
 COND_SYSCALL(rseq);
+
+COND_SYSCALL(sys_kpac_pac);
+COND_SYSCALL(sys_kpac_aut);
