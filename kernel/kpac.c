@@ -81,13 +81,13 @@ static inline void kpacd_poll_one(unsigned int cpu)
 
 		switch (state) {
 		case OP_PAC:
-			area->cipher = kpac_pac(area->plain, area->tweak, key);
+			area->cipher = __kpac_pac(area->plain, area->tweak, key);
 			this_cpu_inc(kpacds.nr_pac);
 			/* trace_printk("#%u: [%lx %lx] -> %lx\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
 			break;
 		case OP_AUT:
-			area->plain = kpac_aut(area->cipher, area->tweak, key);
+			area->plain = __kpac_aut(area->cipher, area->tweak, key);
 			this_cpu_inc(kpacds.nr_aut);
 			/* trace_printk("#%u: %lx <- [%lx %lx]\n", cpu, */
 			/* 	     area->plain, area->tweak, area->cipher); */
@@ -211,7 +211,7 @@ int kpac_exec(void)
 	kpac_populate_pgds(mm);
 
 	memset(&current->kpac_context, 0, sizeof(current->kpac_context));
-	kpac_reset_key(&current->kpac_context.key);
+	__kpac_reset_key(&current->kpac_context.key);
 
 out_unlock:
 	mmap_write_unlock(mm);

@@ -22,15 +22,15 @@ unsigned long __kpac_compute_pac(unsigned long plain, unsigned long tweak,
 }
 
 static inline
-void kpac_reset_key(struct kpac_key *_key)
+void __kpac_reset_key(struct kpac_key *_key)
 {
 	struct kpac_key_u128 *key = &_key->xxhash;
 	get_random_bytes(key, sizeof(*key));
 }
 
 static inline
-unsigned long kpac_pac(unsigned long plain, unsigned long tweak,
-		       struct kpac_key *key)
+unsigned long __kpac_pac(unsigned long plain, unsigned long tweak,
+			 struct kpac_key *key)
 {
 	unsigned long pac;
 	plain &= __KPAC_VA_MASK;
@@ -40,8 +40,8 @@ unsigned long kpac_pac(unsigned long plain, unsigned long tweak,
 }
 
 static inline
-unsigned long kpac_aut(unsigned long cipher, unsigned long tweak,
-		       struct kpac_key *key)
+unsigned long __kpac_aut(unsigned long cipher, unsigned long tweak,
+			 struct kpac_key *key)
 {
 	unsigned long pac, plain;
 	plain = cipher & __KPAC_VA_MASK;
