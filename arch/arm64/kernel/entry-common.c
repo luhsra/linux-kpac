@@ -630,11 +630,11 @@ static void noinstr el0_dbg(struct pt_regs *regs, unsigned long esr)
 	exit_to_user_mode(regs);
 }
 
-static void noinstr el0_svc(struct pt_regs *regs)
+static void noinstr el0_svc(struct pt_regs *regs, u16 imm)
 {
 	enter_from_user_mode(regs);
 	cortex_a76_erratum_1463225_svc_handler();
-	do_el0_svc(regs);
+	do_el0_svc(regs, imm);
 	exit_to_user_mode(regs);
 }
 
@@ -652,7 +652,7 @@ asmlinkage void noinstr el0t_64_sync_handler(struct pt_regs *regs)
 
 	switch (ESR_ELx_EC(esr)) {
 	case ESR_ELx_EC_SVC64:
-		el0_svc(regs);
+		el0_svc(regs, ESR_ELx_ISS(esr) & ESR_ELx_xVC_IMM_MASK);
 		break;
 	case ESR_ELx_EC_DABT_LOW:
 		el0_da(regs, esr);
@@ -766,11 +766,11 @@ static void noinstr el0_cp15(struct pt_regs *regs, unsigned long esr)
 	exit_to_user_mode(regs);
 }
 
-static void noinstr el0_svc_compat(struct pt_regs *regs)
+static void noinstr el0_svc_compat(struct pt_regs *regs, u16 imm)
 {
 	enter_from_user_mode(regs);
 	cortex_a76_erratum_1463225_svc_handler();
-	do_el0_svc_compat(regs);
+	do_el0_svc_compat(regs, imm);
 	exit_to_user_mode(regs);
 }
 
@@ -780,7 +780,7 @@ asmlinkage void noinstr el0t_32_sync_handler(struct pt_regs *regs)
 
 	switch (ESR_ELx_EC(esr)) {
 	case ESR_ELx_EC_SVC32:
-		el0_svc_compat(regs);
+		el0_svc_compat(regs, ESR_ELx_ISS(esr) & ESR_ELx_xVC_IMM_MASK);
 		break;
 	case ESR_ELx_EC_DABT_LOW:
 		el0_da(regs, esr);

@@ -7,6 +7,7 @@
 #include <linux/ptrace.h>
 #include <linux/randomize_kstack.h>
 #include <linux/syscalls.h>
+#include <linux/kpac.h>
 
 #include <asm/daifflags.h>
 #include <asm/debug-monitors.h>
@@ -78,10 +79,19 @@ static inline bool has_syscall_work(unsigned long flags)
 int syscall_trace_enter(struct pt_regs *regs);
 void syscall_trace_exit(struct pt_regs *regs);
 
-static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
+static void el0_svc_common(struct pt_regs *regs, u16 imm, int scno, int sc_nr,
 			   const syscall_fn_t syscall_table[])
 {
 	unsigned long flags = read_thread_flags();
+
+	switch (imm) {
+	case ARM64_SVC_PAC:
+		regs->regs[30] = kpac_pac(regs->regs[30], regs->sp);
+		return;
+	case ARM64_SVC_AUT:
+		regs->regs[30] = kpac_aut(regs->regs[30], regs->sp);
+		return;
+	}
 
 	regs->orig_x0 = regs->regs[0];
 	regs->syscallno = scno;
@@ -200,16 +210,16 @@ static inline void fp_user_discard(void)
 	sve_user_disable();
 }
 
-void do_el0_svc(struct pt_regs *regs)
+void do_el0_svc(struct pt_regs *regs, u16 imm)
 {
 	fp_user_discard();
-	el0_svc_common(regs, regs->regs[8], __NR_syscalls, sys_call_table);
+	el0_svc_common(regs, imm, regs->regs[8], __NR_syscalls, sys_call_table);
 }
 
 #ifdef CONFIG_COMPAT
-void do_el0_svc_compat(struct pt_regs *regs)
+void do_el0_svc_compat(struct pt_regs *regs, u16 imm)
 {
-	el0_svc_common(regs, regs->regs[7], __NR_compat_syscalls,
+	el0_svc_common(regs, imm, regs->regs[7], __NR_compat_syscalls,
 		       compat_sys_call_table);
 }
 #endif

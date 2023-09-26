@@ -4,6 +4,11 @@
 #include <linux/mm_types.h>
 #include <linux/kpac_types.h>
 
+#ifdef CONFIG_ARM64
+#define ARM64_SVC_PAC	0x9AC
+#define ARM64_SVC_AUT	0x9AD
+#endif
+
 #ifdef CONFIG_KPAC
 
 unsigned long kpac_pac(unsigned long plain, unsigned long tweak);
