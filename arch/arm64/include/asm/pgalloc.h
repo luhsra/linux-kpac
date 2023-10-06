@@ -46,6 +46,19 @@ static inline void pud_populate(struct mm_struct *mm, pud_t *pudp, pmd_t *pmdp)
 	pgd_clone_pcpu(mm, (pgd_t *) pudp);
 #endif
 }
+
+#if CONFIG_PGTABLE_LEVELS == 3
+/*
+ * Populate a single pgd entry without mirroring it in per-CPU pgds.
+ */
+static inline void pgd_populate_one(struct mm_struct *mm, pgd_t *pudp, p4d_t *pmdp)
+{
+	pudval_t pudval = PUD_TYPE_TABLE;
+
+	pudval |= (mm == &init_mm) ? PUD_TABLE_UXN : PUD_TABLE_PXN;
+	__pud_populate((pud_t *) pudp, __pa(pmdp), pudval);
+}
+#endif
 #else
 static inline void __pud_populate(pud_t *pudp, phys_addr_t pmdp, pudval_t prot)
 {
@@ -76,12 +89,12 @@ static inline void p4d_populate(struct mm_struct *mm, p4d_t *p4dp, pud_t *pudp)
 /*
  * Populate a single pgd entry without mirroring it in per-CPU pgds.
  */
-static inline void pgd_populate_one(struct mm_struct *mm, pgd_t *pgdp, p4d_t *p4dp)
+static inline void pgd_populate_one(struct mm_struct *mm, pgd_t *p4dp, p4d_t *pudp)
 {
 	p4dval_t p4dval = P4D_TYPE_TABLE;
 
 	p4dval |= (mm == &init_mm) ? P4D_TABLE_UXN : P4D_TABLE_PXN;
-	__p4d_populate((p4d_t *) pgdp, __pa(p4dp), p4dval);
+	__p4d_populate((p4d_t *) p4dp, __pa(pudp), p4dval);
 }
 #endif
 #else

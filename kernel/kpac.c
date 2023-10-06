@@ -353,7 +353,7 @@ static void stop_kpacd(struct kpacd *p)
 static p4d_t *kpac_alloc_pgtables(unsigned long addr, unsigned long pfn)
 {
 	p4d_t *p4dp __maybe_unused;
-	pud_t *pudp;
+	pud_t *pudp __maybe_unused;
 	pmd_t *pmdp;
 	pte_t *ptep, pte;
 	pgtable_t pte_page;
@@ -373,17 +373,21 @@ static p4d_t *kpac_alloc_pgtables(unsigned long addr, unsigned long pfn)
 		goto out_nopmd;
 	pmd_populate(NULL, pmdp+pmd_index(addr), pte_page);
 
+#ifdef __PAGETABLE_PUD_FOLDED
+	return (p4d_t *) pmdp;
+#else
+
 	pudp = pud_alloc_one(NULL, addr);
 	if (!pudp)
 		goto out_nopud;
 	pud_populate(NULL, pudp+pud_index(addr), pmdp);
 
+#ifdef __PAGETABLE_P4D_FOLDED
+	return (p4d_t *) pudp;
+#else
 	if (mm_p4d_folded(&init_mm))
 		return (p4d_t *) pudp;
 
-#ifdef __PAGETABLE_P4D_FOLDED
-	BUG();
-#else
 	p4dp = p4d_alloc_one(NULL, addr);
 	if (!p4dp)
 		goto out_nop4d;
@@ -396,6 +400,7 @@ out_nop4d:
 #endif
 out_nopud:
 	pmd_free(NULL, pmdp);
+#endif
 out_nopmd:
 	pte_free(NULL, pte_page);
 out_nopte:
