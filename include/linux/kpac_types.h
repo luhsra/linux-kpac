@@ -3,6 +3,7 @@
 #ifdef CONFIG_KPAC
 
 #include <asm/types.h>
+#include <linux/siphash.h>
 
 struct kpac_key_u128 {
 	u64 hi, lo;
@@ -16,6 +17,7 @@ struct kpac_key {
 	union {
 		struct kpac_key_u128 xxhash;
 		struct kpac_key_u128 qarma;
+		siphash_key_t siphash;
 	};
 };
 

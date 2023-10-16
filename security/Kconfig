@@ -77,6 +77,9 @@ choice
 	config KPAC_BACKEND_QARMA
 		bool "ARMv8.3 QARMA block cipher"
 
+	config KPAC_BACKEND_SIPHASH
+		bool "SipHash secure pseudorandom function"
+
 endchoice
 
 endif # KPAC
