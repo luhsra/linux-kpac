@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1+
 /*
- * ARMv8.3 QARMA implementation based on QEMU's target/arm/pauth_helper.c
+ * ARMv8.3 QARMA implementation based on github.com/Phantom1003/QARMA64
  *
  * Copyright (c) 2019 Linaro, Ltd.
  * Copyright (c) 2022 Illia Ostapyshyn
@@ -15,264 +15,323 @@
 
 #define __KPAC_VA_MASK		((1ULL << VA_BITS) - 1)
 
-#define MAKE_64BIT_MASK(shift, length) \
-	(((~0ULL) >> (64 - (length))) << (shift))
-
 static const char *const kpac_backend_name = "qarma";
 
-static inline u64 extract64(u64 value, int start, int length)
+#define MAX_LENGTH 64
+#define subcells sbox[sbox_use]
+#define subcells_inv sbox_inv[sbox_use]
+
+typedef unsigned long long int qconst_t;
+typedef unsigned long long int qtweak_t;
+typedef unsigned long long int qtext_t;
+typedef unsigned long long int qkey_t;
+typedef unsigned char          qcell_t;
+
+static int sbox_use = 1;
+
+static int m = MAX_LENGTH / 16;
+
+static qconst_t alpha = 0xC0AC29B7C97C50DD;
+static qconst_t c[8] = { 0x0000000000000000, 0x13198A2E03707344, 0xA4093822299F31D0, 0x082EFA98EC4E6C89,
+	0x452821E638D01377, 0xBE5466CF34E90C6C, 0x3F84D5B5B5470917, 0x9216D5D98979FB1B };
+
+static int sbox[3][16] = { { 0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5},
+			   {10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4},
+			   {11,  6,  8, 15, 12,  0,  9, 14,  3,  7,  4,  5, 13,  2,  1, 10} };
+
+static int sbox_inv[3][16] = { { 0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5},
+			       {10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4},
+			       { 5, 14, 13,  8, 10, 11,  1,  9,  2,  6, 15,  0,  4, 12,  7,  3} };
+
+static int t[16] = { 0, 11,  6, 13, 10,  1, 12,  7,  5, 14,  3,  8, 15,  4,  9,  2 };
+static int t_inv[16] = { 0,  5, 15, 10, 13,  8,  2,  7, 11, 14,  4,  1,  6,  3,  9, 12 };
+static int h[16] = { 6,  5, 14, 15,  0,  1,  2,  3,  7, 12, 13,  4,  8,  9, 10, 11 };
+static int h_inv[16] = { 4,  5,  6,  7, 11,  1,  0,  8, 12, 13, 14, 15,  9, 10,  2,  3 };
+
+#define Q M
+#define M_inv M
+static qcell_t M[16] = { 0, 1, 2, 1,
+	1, 0, 1, 2,
+	2, 1, 0, 1,
+	1, 2, 1, 0 };
+
+static void text2cell(qcell_t* cell, qtext_t is)
 {
-	return (value >> start) & (~0ULL >> (64 - length));
-}
-
-static inline u32 extract32(u32 value, int start, int length)
-{
-	return (value >> start) & (~0U >> (32 - length));
-}
-
-static u64 pac_cell_shuffle(u64 i)
-{
-	u64 o = 0;
-
-	o |= extract64(i, 52, 4);
-	o |= extract64(i, 24, 4) << 4;
-	o |= extract64(i, 44, 4) << 8;
-	o |= extract64(i,  0, 4) << 12;
-
-	o |= extract64(i, 28, 4) << 16;
-	o |= extract64(i, 48, 4) << 20;
-	o |= extract64(i,  4, 4) << 24;
-	o |= extract64(i, 40, 4) << 28;
-
-	o |= extract64(i, 32, 4) << 32;
-	o |= extract64(i, 12, 4) << 36;
-	o |= extract64(i, 56, 4) << 40;
-	o |= extract64(i, 20, 4) << 44;
-
-	o |= extract64(i,  8, 4) << 48;
-	o |= extract64(i, 36, 4) << 52;
-	o |= extract64(i, 16, 4) << 56;
-	o |= extract64(i, 60, 4) << 60;
-
-	return o;
-}
-
-static u64 pac_cell_inv_shuffle(u64 i)
-{
-	u64 o = 0;
-
-	o |= extract64(i, 12, 4);
-	o |= extract64(i, 24, 4) << 4;
-	o |= extract64(i, 48, 4) << 8;
-	o |= extract64(i, 36, 4) << 12;
-
-	o |= extract64(i, 56, 4) << 16;
-	o |= extract64(i, 44, 4) << 20;
-	o |= extract64(i,  4, 4) << 24;
-	o |= extract64(i, 16, 4) << 28;
-
-	o |= i & MAKE_64BIT_MASK(32, 4);
-	o |= extract64(i, 52, 4) << 36;
-	o |= extract64(i, 28, 4) << 40;
-	o |= extract64(i,  8, 4) << 44;
-
-	o |= extract64(i, 20, 4) << 48;
-	o |= extract64(i,  0, 4) << 52;
-	o |= extract64(i, 40, 4) << 56;
-	o |= i & MAKE_64BIT_MASK(60, 4);
-
-	return o;
-}
-
-static u64 pac_sub(u64 i)
-{
-	static const u8 sub[16] = {
-		0xb, 0x6, 0x8, 0xf, 0xc, 0x0, 0x9, 0xe,
-		0x3, 0x7, 0x4, 0x5, 0xd, 0x2, 0x1, 0xa,
-	};
-	u64 o = 0;
-	int b;
-
-	for (b = 0; b < 64; b += 4) {
-		o |= (u64)sub[(i >> b) & 0xf] << b;
+	// for 64 bits
+	char* byte_ptr = (char*)&is;
+	for (int i = 0; i < MAX_LENGTH / 8; i++) {
+		char byte = byte_ptr[i];
+		cell[2 * (7 - i) + 0] = (byte & 0xF0) >> 4;
+		cell[2 * (7 - i) + 1] = byte & 0xF;
 	}
-	return o;
 }
 
-static u64 pac_inv_sub(u64 i)
+static qtext_t cell2text(qcell_t* cell)
 {
-	static const u8 inv_sub[16] = {
-		0x5, 0xe, 0xd, 0x8, 0xa, 0xb, 0x1, 0x9,
-		0x2, 0x6, 0xf, 0x0, 0x4, 0xc, 0x7, 0x3,
-	};
-	u64 o = 0;
-	int b;
-
-	for (b = 0; b < 64; b += 4) {
-		o |= (u64)inv_sub[(i >> b) & 0xf] << b;
+	qtext_t is = 0;
+	for (int i = 0; i < MAX_LENGTH / 8; i++) {
+		qtext_t byte = 0;
+		byte = (cell[2 * i] << 4) | cell[2 * i + 1];
+		is = is | (byte << (7 - i) * 8UL);
 	}
-	return o;
+	return is;
 }
 
-static int rot_cell(int cell, int n)
+static qtext_t pseudo_reflect(qtext_t is, qkey_t tk)
 {
-	/* 4-bit rotate left by n.  */
-	cell |= cell << 4;
-	return extract32(cell, 4 - n, 4);
-}
+	qcell_t cell[16];
+	qcell_t perm[16];
 
-static u64 pac_mult(u64 i)
-{
-	u64 o = 0;
-	int b;
+	text2cell(cell, is);
 
-	for (b = 0; b < 4 * 4; b += 4) {
-		int i0, i4, i8, ic, t0, t1, t2, t3;
+	// ShuffleCells
+	for (int i = 0; i < 16; i++)
+		perm[i] = cell[t[i]];
 
-		i0 = extract64(i, b, 4);
-		i4 = extract64(i, b + 4 * 4, 4);
-		i8 = extract64(i, b + 8 * 4, 4);
-		ic = extract64(i, b + 12 * 4, 4);
-
-		t0 = rot_cell(i8, 1) ^ rot_cell(i4, 2) ^ rot_cell(i0, 1);
-		t1 = rot_cell(ic, 1) ^ rot_cell(i4, 1) ^ rot_cell(i0, 2);
-		t2 = rot_cell(ic, 2) ^ rot_cell(i8, 1) ^ rot_cell(i0, 1);
-		t3 = rot_cell(ic, 1) ^ rot_cell(i8, 2) ^ rot_cell(i4, 1);
-
-		o |= (u64)t3 << b;
-		o |= (u64)t2 << (b + 4 * 4);
-		o |= (u64)t1 << (b + 8 * 4);
-		o |= (u64)t0 << (b + 12 * 4);
-	}
-	return o;
-}
-
-static u64 tweak_cell_rot(u64 cell)
-{
-	return (cell >> 1) | (((cell ^ (cell >> 1)) & 1) << 3);
-}
-
-static u64 tweak_shuffle(u64 i)
-{
-	u64 o = 0;
-
-	o |= extract64(i, 16, 4) << 0;
-	o |= extract64(i, 20, 4) << 4;
-	o |= tweak_cell_rot(extract64(i, 24, 4)) << 8;
-	o |= extract64(i, 28, 4) << 12;
-
-	o |= tweak_cell_rot(extract64(i, 44, 4)) << 16;
-	o |= extract64(i,  8, 4) << 20;
-	o |= extract64(i, 12, 4) << 24;
-	o |= tweak_cell_rot(extract64(i, 32, 4)) << 28;
-
-	o |= extract64(i, 48, 4) << 32;
-	o |= extract64(i, 52, 4) << 36;
-	o |= extract64(i, 56, 4) << 40;
-	o |= tweak_cell_rot(extract64(i, 60, 4)) << 44;
-
-	o |= tweak_cell_rot(extract64(i,  0, 4)) << 48;
-	o |= extract64(i,  4, 4) << 52;
-	o |= tweak_cell_rot(extract64(i, 40, 4)) << 56;
-	o |= tweak_cell_rot(extract64(i, 36, 4)) << 60;
-
-	return o;
-}
-
-static u64 tweak_cell_inv_rot(u64 cell)
-{
-	return ((cell << 1) & 0xf) | ((cell & 1) ^ (cell >> 3));
-}
-
-static u64 tweak_inv_shuffle(u64 i)
-{
-	u64 o = 0;
-
-	o |= tweak_cell_inv_rot(extract64(i, 48, 4));
-	o |= extract64(i, 52, 4) << 4;
-	o |= extract64(i, 20, 4) << 8;
-	o |= extract64(i, 24, 4) << 12;
-
-	o |= extract64(i,  0, 4) << 16;
-	o |= extract64(i,  4, 4) << 20;
-	o |= tweak_cell_inv_rot(extract64(i,  8, 4)) << 24;
-	o |= extract64(i, 12, 4) << 28;
-
-	o |= tweak_cell_inv_rot(extract64(i, 28, 4)) << 32;
-	o |= tweak_cell_inv_rot(extract64(i, 60, 4)) << 36;
-	o |= tweak_cell_inv_rot(extract64(i, 56, 4)) << 40;
-	o |= tweak_cell_inv_rot(extract64(i, 16, 4)) << 44;
-
-	o |= extract64(i, 32, 4) << 48;
-	o |= extract64(i, 36, 4) << 52;
-	o |= extract64(i, 40, 4) << 56;
-	o |= tweak_cell_inv_rot(extract64(i, 44, 4)) << 60;
-
-	return o;
-}
-
-static u64 __kpac_compute_pac(u64 data, u64 modifier, struct kpac_key *key)
-{
-	static const u64 RC[5] = {
-		0x0000000000000000ull,
-		0x13198A2E03707344ull,
-		0xA4093822299F31D0ull,
-		0x082EFA98EC4E6C89ull,
-		0x452821E638D01377ull,
-	};
-	const u64 alpha = 0xC0AC29B7C97C50DDull;
-	/*
-	 * Note that in the ARM pseudocode, key0 contains bits <127:64>
-	 * and key1 contains bits <63:0> of the 128-bit key.
-	 */
-	u64 key0 = key->qarma.hi, key1 = key->qarma.lo;
-	u64 workingval, runningmod, roundkey, modk0;
-	int i;
-
-	modk0 = (key0 << 63) | ((key0 >> 1) ^ (key0 >> 63));
-	runningmod = modifier;
-	workingval = data ^ key0;
-
-	for (i = 0; i <= 4; ++i) {
-		roundkey = key1 ^ runningmod;
-		workingval ^= roundkey;
-		workingval ^= RC[i];
-		if (i > 0) {
-			workingval = pac_cell_shuffle(workingval);
-			workingval = pac_mult(workingval);
+	// MixColumns
+	for (int x = 0; x < 4; x++) {
+		for (int y = 0; y < 4; y++) {
+			qcell_t temp = 0;
+			for (int j = 0; j < 4; j++) {
+				int b;
+				if ((b = Q[4 * x + j])) {
+					qcell_t a = perm[4 * j + y];
+					temp ^= ((a << b) & 0x0F) | (a >> (4 - b));
+				}
+			}
+			cell[4 * x + y] = temp;
 		}
-		workingval = pac_sub(workingval);
-		runningmod = tweak_shuffle(runningmod);
 	}
-	roundkey = modk0 ^ runningmod;
-	workingval ^= roundkey;
-	workingval = pac_cell_shuffle(workingval);
-	workingval = pac_mult(workingval);
-	workingval = pac_sub(workingval);
-	workingval = pac_cell_shuffle(workingval);
-	workingval = pac_mult(workingval);
-	workingval ^= key1;
-	workingval = pac_cell_inv_shuffle(workingval);
-	workingval = pac_inv_sub(workingval);
-	workingval = pac_mult(workingval);
-	workingval = pac_cell_inv_shuffle(workingval);
-	workingval ^= key0;
-	workingval ^= runningmod;
-	for (i = 0; i <= 4; ++i) {
-		workingval = pac_inv_sub(workingval);
-		if (i < 4) {
-			workingval = pac_mult(workingval);
-			workingval = pac_cell_inv_shuffle(workingval);
-		}
-		runningmod = tweak_inv_shuffle(runningmod);
-		roundkey = key1 ^ runningmod;
-		workingval ^= RC[4 - i];
-		workingval ^= roundkey;
-		workingval ^= alpha;
-	}
-	workingval ^= modk0;
 
-	return workingval;
+	// AddRoundTweakey
+	for (int i = 0; i < 16; i++)
+		cell[i] ^= (tk >> (4 * (15 - i))) & 0xF;
+
+	// ShuffleCells invert
+	for (int i = 0; i < 16; i++)
+		perm[i] = cell[t_inv[i]];
+
+	return cell2text(perm);
+}
+
+static qtext_t forward(qtext_t is, qkey_t tk, int r)
+{
+	qcell_t cell[16];
+
+	is ^= tk;
+
+	text2cell(cell, is);
+
+	if (r != 0) {
+		// ShuffleCells
+		qcell_t perm[16];
+		for (int i = 0; i < 16; i++)
+			perm[i] = cell[t[i]];
+
+		// MixColumns
+		for (int x = 0; x < 4; x++) {
+			for (int y = 0; y < 4; y++) {
+				qcell_t temp = 0;
+				for (int j = 0; j < 4; j++) {
+					int b;
+					if ((b = M[4 * x + j])) {
+						qcell_t a = perm[4 * j + y];
+						temp ^= ((a << b) & 0x0F) | (a >> (4 - b));
+					}
+				}
+				cell[4 * x + y] = temp;
+			}
+		}
+	}
+
+	// SubCells
+	for (int i = 0; i < 16; i++) {
+		cell[i] = subcells[cell[i]];
+	}
+	is = cell2text(cell);
+	//printf("0x%016llx\n", is);
+
+	return is;
+}
+
+static qtext_t backward(qtext_t is, qkey_t tk, int r)
+{
+	qcell_t cell[16];
+	text2cell(cell, is);
+
+	// SubCells
+	for (int i = 0; i < 16; i++) {
+		cell[i] = subcells_inv[cell[i]];
+	}
+
+	if (r != 0) {
+		qcell_t mixc[16];
+		// MixColumns
+		for (int x = 0; x < 4; x++) {
+			for (int y = 0; y < 4; y++) {
+				qcell_t temp = 0;
+				for (int j = 0; j < 4; j++) {
+					int b;
+					if ((b = M_inv[4 * x + j])) {
+						qcell_t a = cell[4 * j + y];
+						temp ^= ((a << b) & 0x0F) | (a >> (4 - b));
+					}
+				}
+				mixc[4 * x + y] = temp;
+			}
+		}
+
+		// ShuffleCells
+		for (int i = 0; i < 16; i++)
+			cell[i] = mixc[t_inv[i]];
+	}
+
+	is = cell2text(cell);
+	is ^= tk;
+	return is;
+}
+
+static qcell_t LFSR(qcell_t x)
+{
+	qcell_t b0 = (x >> 0) & 1;
+	qcell_t b1 = (x >> 1) & 1;
+	qcell_t b2 = (x >> 2) & 1;
+	qcell_t b3 = (x >> 3) & 1;
+
+	return ((b0 ^ b1) << 3) | (b3 << 2) | (b2 << 1) | (b1 << 0);
+}
+
+static qcell_t LFSR_inv(qcell_t x)
+{
+	qcell_t b0 = (x >> 0) & 1;
+	qcell_t b1 = (x >> 1) & 1;
+	qcell_t b2 = (x >> 2) & 1;
+	qcell_t b3 = (x >> 3) & 1;
+
+	return ((b0 ^ b3) << 0) | (b0 << 1) | (b1 << 2) | (b2 << 3);
+}
+
+static qkey_t forward_update_key(qkey_t T)
+{
+	qcell_t cell[16], temp[16];
+	text2cell(cell, T);
+
+	// h box
+	for (int i = 0; i < 16; i++) {
+		temp[i] = cell[h[i]];
+	}
+
+	// w LFSR
+	temp[0] = LFSR(temp[0]);
+	temp[1] = LFSR(temp[1]);
+	temp[3] = LFSR(temp[3]);
+	temp[4] = LFSR(temp[4]);
+	temp[8] = LFSR(temp[8]);
+	temp[11] = LFSR(temp[11]);
+	temp[13] = LFSR(temp[13]);
+
+	return cell2text(temp);
+}
+
+static qkey_t backward_update_key(qkey_t T)
+{
+	qcell_t cell[16], temp[16];
+	text2cell(cell, T);
+
+	// w LFSR invert
+	cell[0] = LFSR_inv(cell[0]);
+	cell[1] = LFSR_inv(cell[1]);
+	cell[3] = LFSR_inv(cell[3]);
+	cell[4] = LFSR_inv(cell[4]);
+	cell[8] = LFSR_inv(cell[8]);
+	cell[11] = LFSR_inv(cell[11]);
+	cell[13] = LFSR_inv(cell[13]);
+
+	// h box
+	for (int i = 0; i < 16; i++) {
+		temp[i] = cell[h_inv[i]];
+	}
+
+	return cell2text(temp);
+}
+
+static qtext_t qarma64_enc(qtext_t plaintext, qtweak_t tweak, qkey_t w0, qkey_t k0, int rounds)
+{
+	qkey_t w1 = ((w0 >> 1) | (w0 << (64 - 1))) ^ (w0 >> (16 * m - 1));
+	qkey_t k1 = k0;
+
+	qtext_t is = plaintext ^ w0;
+
+	for (int i = 0; i < rounds; i++) {
+		is = forward(is, k0 ^ tweak ^ c[i], i);
+		tweak = forward_update_key(tweak);
+	}
+
+	is = forward(is, w1 ^ tweak, 1);
+	is = pseudo_reflect(is, k1);
+	is = backward(is, w0 ^ tweak, 1);
+
+	for (int i = rounds - 1; i >= 0; i--) {
+		tweak = backward_update_key(tweak);
+		is = backward(is, k0 ^ tweak ^ c[i] ^ alpha, i);
+	}
+
+	is ^= w1;
+	return is;
+}
+
+__attribute__((unused))
+static qtext_t qarma64_dec(qtext_t plaintext, qtweak_t tweak, qkey_t w0, qkey_t k0, int rounds)
+{
+	qkey_t w1 = w0;
+	qcell_t k0_cell[16], k1_cell[16];
+	qkey_t k1;
+	qtext_t is;
+
+	w0 = ((w0 >> 1) | (w0 << (64 - 1))) ^ (w0 >> (16 * m - 1));
+
+	text2cell(k0_cell, k0);
+	// MixColumns
+	for (int x = 0; x < 4; x++) {
+		for (int y = 0; y < 4; y++) {
+			qcell_t temp = 0;
+			for (int j = 0; j < 4; j++) {
+				int b;
+				if ((b = Q[4 * x + j])) {
+					qcell_t a = k0_cell[4 * j + y];
+					temp ^= ((a << b) & 0x0F) | (a >> (4 - b));
+				}
+			}
+			k1_cell[4 * x + y] = temp;
+		}
+	}
+	k1 = cell2text(k1_cell);
+
+	k0 ^= alpha;
+
+	is = plaintext ^ w0;
+
+	for (int i = 0; i < rounds; i++) {
+		is = forward(is, k0 ^ tweak ^ c[i], i);
+		tweak = forward_update_key(tweak);
+	}
+
+	is = forward(is, w1 ^ tweak, 1);
+	is = pseudo_reflect(is, k1);
+	is = backward(is, w0 ^ tweak, 1);
+
+	for (int i = rounds - 1; i >= 0; i--) {
+		tweak = backward_update_key(tweak);
+		is = backward(is, k0 ^ tweak ^ c[i] ^ alpha, i);
+	}
+
+	is ^= w1;
+	return is;
+}
+
+static inline u64 __kpac_compute_pac(u64 plain, u64 tweak, struct kpac_key *key)
+{
+	return qarma64_enc(plain, tweak, key->qarma.hi, key->qarma.lo, 5);
 }
 
 static inline
