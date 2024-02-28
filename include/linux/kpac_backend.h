@@ -14,6 +14,8 @@
 #include <linux/kpac/qarma.h>
 #elif defined(CONFIG_KPAC_BACKEND_SIPHASH)
 #include <linux/kpac/siphash.h>
+#elif defined(CONFIG_KPAC_BACKEND_PAC_PL)
+#include <linux/kpac/pac-pl.h>
 #else
 #error "No pointer authentication backend selected"
 #endif

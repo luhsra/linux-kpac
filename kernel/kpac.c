@@ -71,6 +71,10 @@ static struct task_struct *kpac_task[NR_CPUS] __cacheline_aligned;
 
 static bool kpac_initialized = false;
 
+#ifdef CONFIG_KPAC_BACKEND_PAC_PL
+void *pac_pl_base = NULL;
+#endif
+
 unsigned long kpac_pac(unsigned long plain, unsigned long tweak)
 {
 	struct task_struct *p = current;
@@ -652,6 +656,11 @@ static int __init kpac_init(void)
 	ret = kpac_init_debugfs();
 	if (ret)
 		WARN_ON(1);
+
+#ifdef CONFIG_KPAC_BACKEND_PAC_PL
+	pac_pl_base = memremap(PAC_PL_BASE, PAGE_SIZE, MEMREMAP_WT);
+	BUG_ON(!pac_pl_base);
+#endif
 
 	smp_store_release(&kpac_initialized, true);
 	return 0;

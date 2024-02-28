@@ -80,6 +80,9 @@ choice
 	config KPAC_BACKEND_SIPHASH
 		bool "SipHash secure pseudorandom function"
 
+	config KPAC_BACKEND_PAC_PL
+		bool "PAC-PL backend on an FPGA"
+
 endchoice
 
 endif # KPAC
