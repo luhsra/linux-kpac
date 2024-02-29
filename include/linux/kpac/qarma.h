@@ -18,8 +18,6 @@
 static const char *const kpac_backend_name = "qarma";
 
 #define MAX_LENGTH 64
-#define subcells sbox[sbox_use]
-#define subcells_inv sbox_inv[sbox_use]
 
 typedef unsigned long long int qconst_t;
 typedef unsigned long long int qtweak_t;
@@ -27,33 +25,45 @@ typedef unsigned long long int qtext_t;
 typedef unsigned long long int qkey_t;
 typedef unsigned char          qcell_t;
 
-static int sbox_use = 1;
-
 static int m = MAX_LENGTH / 16;
 
 static qconst_t alpha = 0xC0AC29B7C97C50DD;
-static qconst_t c[8] = { 0x0000000000000000, 0x13198A2E03707344, 0xA4093822299F31D0, 0x082EFA98EC4E6C89,
-	0x452821E638D01377, 0xBE5466CF34E90C6C, 0x3F84D5B5B5470917, 0x9216D5D98979FB1B };
+static qconst_t c[8] = {
+	0x0000000000000000, 0x13198A2E03707344, 0xA4093822299F31D0,
+	0x082EFA98EC4E6C89, 0x452821E638D01377, 0xBE5466CF34E90C6C,
+	0x3F84D5B5B5470917, 0x9216D5D98979FB1B,
+};
 
-static int sbox[3][16] = { { 0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5},
-			   {10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4},
-			   {11,  6,  8, 15, 12,  0,  9, 14,  3,  7,  4,  5, 13,  2,  1, 10} };
+static int sbox[3][16] = {
+	{  0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5 },
+	{ 10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4 },
+	{ 11,  6,  8, 15, 12,  0,  9, 14,  3,  7,  4,  5, 13,  2,  1, 10 },
+};
 
-static int sbox_inv[3][16] = { { 0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5},
-			       {10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4},
-			       { 5, 14, 13,  8, 10, 11,  1,  9,  2,  6, 15,  0,  4, 12,  7,  3} };
+static int sbox_inv[3][16] = {
+	{  0, 14,  2, 10,  9, 15,  8, 11,  6,  4,  3,  7, 13, 12,  1,  5 },
+	{ 10, 13, 14,  6, 15,  7,  3,  5,  9,  8,  0, 12, 11,  1,  2,  4 },
+	{  5, 14, 13,  8, 10, 11,  1,  9,  2,  6, 15,  0,  4, 12,  7,  3 },
+};
 
-static int t[16] = { 0, 11,  6, 13, 10,  1, 12,  7,  5, 14,  3,  8, 15,  4,  9,  2 };
+#define SBOX_USE 1
+static int *subcells     = sbox[SBOX_USE];
+static int *subcells_inv = sbox_inv[SBOX_USE];
+
+static int t[16]     = { 0, 11,  6, 13, 10,  1, 12,  7,  5, 14,  3,  8, 15,  4,  9,  2 };
 static int t_inv[16] = { 0,  5, 15, 10, 13,  8,  2,  7, 11, 14,  4,  1,  6,  3,  9, 12 };
-static int h[16] = { 6,  5, 14, 15,  0,  1,  2,  3,  7, 12, 13,  4,  8,  9, 10, 11 };
+static int h[16]     = { 6,  5, 14, 15,  0,  1,  2,  3,  7, 12, 13,  4,  8,  9, 10, 11 };
 static int h_inv[16] = { 4,  5,  6,  7, 11,  1,  0,  8, 12, 13, 14, 15,  9, 10,  2,  3 };
 
-#define Q M
-#define M_inv M
-static qcell_t M[16] = { 0, 1, 2, 1,
+static qcell_t M[16] = {
+	0, 1, 2, 1,
 	1, 0, 1, 2,
 	2, 1, 0, 1,
-	1, 2, 1, 0 };
+	1, 2, 1, 0,
+};
+
+static qcell_t *Q     = M;
+static qcell_t *M_inv = M;
 
 static void text2cell(qcell_t* cell, qtext_t is)
 {
@@ -331,14 +341,15 @@ static qtext_t qarma64_dec(qtext_t plaintext, qtweak_t tweak, qkey_t w0, qkey_t 
 
 static inline u64 __kpac_compute_pac(u64 plain, u64 tweak, struct kpac_key *key)
 {
-	return qarma64_enc(plain, tweak, key->qarma.hi, key->qarma.lo, 5);
+	return qarma64_enc(plain, tweak, key->qarma.hi, key->qarma.lo, 7);
 }
 
 static inline
 void __kpac_reset_key(struct kpac_key *_key)
 {
 	struct kpac_key_u128 *key = &_key->qarma;
-	get_random_bytes(key, sizeof(*key));
+	/* get_random_bytes(key, sizeof(*key)); */
+	memset(key, 0, sizeof(*key));
 }
 
 static inline
