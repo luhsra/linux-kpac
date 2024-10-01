@@ -2,8 +2,8 @@ Linux kernel with kpac extensions
 =================================
 
 This repository contains the source code of the Linux kernel with kpac
-extensions described in "Software-Emulated Pointer Authentication for
-Control-Flow Integrity Protection" [1].
+extensions described in "KPAC: Efficient Emulation of the ARM Pointer
+Authentication Instructions" [1].
 
 The core kpac functionality is implemented in kernel/kpac.c.  The various
 hashing backends are implemented as header files in include/linux/kpac/ and are
@@ -19,6 +19,7 @@ The Kconfig database is extended with following configuration options:
          +- None (DEBUG)
          +- xxHash hashing algorithm
          +- ARMv8.3 QARMA block cipher
+         +- PAC-PL backend on an FPGA
 
 The extension is configured at runtime by writing into the debugfs directory
 tree /sys/kernel/debug/kpac/:
@@ -40,4 +41,4 @@ tree /sys/kernel/debug/kpac/:
 
 -----------
 
-[1] https://scm.sra.uni-hannover.de/theses/2022/BA_ill.ostapyshyn
+[1] https://sra.uni-hannover.de/Publications/2024/ostapyshyn_24_emsoft.pdf
